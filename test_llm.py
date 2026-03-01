@@ -3,7 +3,7 @@ from services.llm_service import LLMService
 import config
 
 async def test():
-    print(f"Testing LLM Service with model: {config.OPENROUTER_MODEL}")
+    print(f"Testing LLM Service with model: {config.GROQ_MODEL}")
     service = LLMService()
     messages = [{"role": "user", "content": "Say 'Hello World' if you can hear me."}]
     try:

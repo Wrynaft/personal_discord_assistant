@@ -1,0 +1,15 @@
+[Unit]
+Description=Personal Discord Assistant
+After=network.target
+
+[Service]
+# Default Oracle Cloud Ubuntu user is 'ubuntu'
+# Change if your username differs (check with: whoami)
+User=ubuntu
+WorkingDirectory=/home/ubuntu/personal_discord_assistant
+ExecStart=/home/ubuntu/personal_discord_assistant/venv/bin/python3 main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

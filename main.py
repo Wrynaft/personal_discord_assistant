@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import config
 from services.llm_service import LLMService
+from services.news_service import NewsService
 
 # proper intents are required for the bot to see messages
 intents = discord.Intents.default()
@@ -9,6 +10,7 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 llm_service = LLMService()
+news_service = NewsService()
 
 @bot.event
 async def on_ready():
@@ -18,6 +20,29 @@ async def on_ready():
 @bot.command()
 async def ping(ctx):
     await ctx.send('Pong!')
+
+@bot.command()
+async def news(ctx):
+    """
+    Fetches the latest tech news and summarizes it using the LLM.
+    """
+    async with ctx.typing():
+        # 1. Fetch News
+        headlines = await news_service.fetch_tech_news(limit=10)
+        
+        if headlines.startswith("Error") or headlines == "No news found today.":
+            await ctx.send(headlines)
+            return
+
+        # 2. Summarize via LLM
+        prompt = [
+            {"role": "system", "content": "You are a tech news reporter. Summarize the following headlines into a concise daily digest. Use bullet points and emoji."},
+            {"role": "user", "content": headlines}
+        ]
+        summary = await llm_service.generate_response(prompt)
+        
+        # 3. Post to Discord
+        await ctx.send(f"**📰 Daily Tech News Digest**\n{summary}")
 
 @bot.event
 async def on_message(message):

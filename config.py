@@ -5,10 +5,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemini-2.0-flash-001")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 if not DISCORD_TOKEN:
     raise ValueError("DISCORD_TOKEN not found in .env file")
-if not OPENROUTER_API_KEY:
-    raise ValueError("OPENROUTER_API_KEY not found in .env file")
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY not found in .env file")
+
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+if not NEWS_API_KEY:
+    # Warning only, don't crash if they haven't added it yet
+    print("Warning: NEWS_API_KEY not found in .env file. News features will fail.")
