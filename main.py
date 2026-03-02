@@ -24,6 +24,23 @@ arxiv_service = ArxivService()
 # Store recent news context keyed by message ID for follow-up queries
 _news_context = {}
 
+def _build_links_field(items, formatter, max_chars=1024):
+    """
+    Builds a link field string by adding items one-by-one,
+    stopping before exceeding Discord's field character limit.
+    """
+    lines = []
+    total = 0
+    for item in items:
+        line = formatter(item)
+        # +1 for the newline separator
+        if total + len(line) + 1 > max_chars:
+            break
+        lines.append(line)
+        total += len(line) + 1
+    return "\n".join(lines)
+
+
 NEWS_SYSTEM_PROMPT = (
     "You are a tech news reporter. Summarize the following headlines into a concise daily digest. "
     "Group related headlines by category (e.g. 📱 Mobile, 🎮 Gaming, 🔒 Security, 💻 Software, 🤖 AI, 🛠️ Hardware). "
@@ -79,13 +96,12 @@ async def post_news_digest(destination):
     )
 
     # Add source links as a compact field
-    links = "\n".join(
-        f"[{i}. {art['title'][:50]}{'...' if len(art['title']) > 50 else ''}]({art['url']})"
-        for i, art in enumerate(articles, 1)
-        if art['url']
+    links = _build_links_field(
+        [(i, art) for i, art in enumerate(articles, 1) if art['url']],
+        lambda x: f"[{x[0]}. {x[1]['title'][:50]}{'...' if len(x[1]['title']) > 50 else ''}]({x[1]['url']})"
     )
     if links:
-        embed.add_field(name="🔗 Source Links", value=links[:1024], inline=False)
+        embed.add_field(name="🔗 Source Links", value=links, inline=False)
 
     embed.set_footer(text=f"{today} • 💬 Reply to this message to ask about any headline")
     embed.timestamp = datetime.now(MYT)
@@ -135,12 +151,12 @@ async def post_hn_digest(destination):
     )
 
     # Add story links
-    links = "\n".join(
-        f"[{i}. {s['title'][:50]}{'...' if len(s['title']) > 50 else ''}]({s['url']}) ({s['points']}⬆)"
-        for i, s in enumerate(stories, 1)
+    links = _build_links_field(
+        list(enumerate(stories, 1)),
+        lambda x: f"[{x[0]}. {x[1]['title'][:50]}{'...' if len(x[1]['title']) > 50 else ''}]({x[1]['url']}) ({x[1]['points']}⬆)"
     )
     if links:
-        embed.add_field(name="🔗 Stories & Discussions", value=links[:1024], inline=False)
+        embed.add_field(name="🔗 Stories & Discussions", value=links, inline=False)
 
     embed.set_footer(text=f"{today} • 💬 Reply to ask about any story")
     embed.timestamp = datetime.now(MYT)
@@ -189,13 +205,12 @@ async def post_papers_digest(destination):
     )
 
     # Add paper links
-    links = "\n".join(
-        f"[{i}. {p['title'][:50]}{'...' if len(p['title']) > 50 else ''}]({p['url']})"
-        for i, p in enumerate(papers, 1)
-        if p['url']
+    links = _build_links_field(
+        [(i, p) for i, p in enumerate(papers, 1) if p['url']],
+        lambda x: f"[{x[0]}. {x[1]['title'][:50]}{'...' if len(x[1]['title']) > 50 else ''}]({x[1]['url']})"
     )
     if links:
-        embed.add_field(name="🔗 Read the Papers", value=links[:1024], inline=False)
+        embed.add_field(name="🔗 Read the Papers", value=links, inline=False)
 
     embed.set_footer(text=f"{today} • 💬 Reply to ask about any paper")
     embed.timestamp = datetime.now(MYT)
