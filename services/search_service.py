@@ -1,5 +1,5 @@
 import re
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 
 # Patterns that suggest the user is asking a factual question
