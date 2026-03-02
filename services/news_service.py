@@ -9,7 +9,9 @@ class NewsService:
     async def fetch_tech_news(self, limit=10):
         """
         Fetches top technology headlines.
-        Returns: String summary of headlines for the LLM.
+        Returns:
+            list[dict] on success — each dict has: title, source, description, url
+            str on error — error message string
         """
         if not self.api_key:
             return "Error: NEWS_API_KEY is missing."
@@ -33,15 +35,25 @@ class NewsService:
                     if not articles:
                         return "No news found today."
 
-                    # Format for LLM
-                    news_text = "Here are the top tech headlines for today:\n"
-                    for i, art in enumerate(articles, 1):
-                        source = art.get("source", {}).get("name", "Unknown")
-                        title = art.get("title", "No Title")
-                        desc = art.get("description") or "No description"
-                        url = art.get("url", "")
-                        news_text += f"{i}. [{source}] {title}\n   Context: {desc}\n   Link: {url}\n"
-                    
-                    return news_text
+                    # Return structured data for richer formatting
+                    return [
+                        {
+                            "title": art.get("title", "No Title"),
+                            "source": art.get("source", {}).get("name", "Unknown"),
+                            "description": art.get("description") or "No description available.",
+                            "url": art.get("url", ""),
+                        }
+                        for art in articles
+                    ]
             except Exception as e:
                 return f"Error fetching news: {e}"
+
+    @staticmethod
+    def format_for_llm(articles):
+        """Formats the structured article list into a text block for the LLM."""
+        text = "Here are today's top tech headlines:\n\n"
+        for i, art in enumerate(articles, 1):
+            text += f"{i}. [{art['source']}] {art['title']}\n"
+            text += f"   Summary: {art['description']}\n"
+            text += f"   Link: {art['url']}\n\n"
+        return text

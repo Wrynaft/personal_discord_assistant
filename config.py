@@ -17,3 +17,9 @@ NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 if not NEWS_API_KEY:
     # Warning only, don't crash if they haven't added it yet
     print("Warning: NEWS_API_KEY not found in .env file. News features will fail.")
+
+# Channel ID for scheduled daily news posts
+_news_channel = os.getenv("NEWS_CHANNEL_ID")
+NEWS_CHANNEL_ID = int(_news_channel) if _news_channel else None
+if not NEWS_CHANNEL_ID:
+    print("Warning: NEWS_CHANNEL_ID not set. Daily scheduled news will not run.")
