@@ -1,0 +1,14 @@
+[Unit]
+Description=Discord Analytics Kafka Consumer
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/personal_discord_assistant
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/personal_discord_assistant/venv/bin/python3 -m consumers.event_consumer
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

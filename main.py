@@ -6,7 +6,7 @@ from services.llm_service import LLMService
 from services.news_service import NewsService
 from services.hn_service import HNService
 from services.arxiv_service import ArxivService
-from services.analytics_service import AnalyticsService
+from services.kafka_producer import KafkaProducer
 from services import search_service
 
 # Malaysian Time = UTC+8
@@ -26,7 +26,7 @@ llm_service = LLMService()
 news_service = NewsService()
 hn_service = HNService()
 arxiv_service = ArxivService()
-analytics = AnalyticsService()
+kafka = KafkaProducer()
 
 # Store recent news context keyed by message ID for follow-up queries
 _news_context = {}
@@ -239,11 +239,11 @@ async def on_ready():
     print(f'Logged in as {bot.user} (ID: {bot.user.id})')
     print('------')
 
-    # Connect analytics database
+    # Connect Kafka producer
     try:
-        await analytics.connect()
+        await kafka.connect()
     except Exception as e:
-        print(f'Warning: Analytics DB not available ({e}). Event logging disabled.')
+        print(f'Warning: Kafka not available ({e}). Event streaming disabled.')
 
     # Start daily schedulers
     if config.NEWS_CHANNEL_ID:
@@ -343,9 +343,9 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
-    # Log message to analytics (fire-and-forget, never block the bot)
+    # Log message to Kafka (fire-and-forget, never block the bot)
     try:
-        await analytics.log_message(message)
+        await kafka.send_message_event(message)
     except Exception:
         pass
 
@@ -431,68 +431,67 @@ async def on_message(message):
             response = await llm_service.generate_response(messages)
             await message.reply(response)
 
-# ── Analytics Event Handlers ────────────────────────────
+# ── Analytics Event Handlers (via Kafka) ─────────────────
 
 @bot.event
 async def on_message_edit(before, after):
-    """Log message edits."""
+    """Log message edits to Kafka."""
     try:
-        await analytics.log_message(after, event_type='edit')
+        await kafka.send_message_event(after, event_type='edit')
     except Exception:
         pass
 
 @bot.event
 async def on_message_delete(message):
-    """Log message deletions."""
+    """Log message deletions to Kafka."""
     try:
-        await analytics.log_message(message, event_type='delete')
+        await kafka.send_message_event(message, event_type='delete')
     except Exception:
         pass
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    """Log voice channel join/leave/move events."""
+    """Log voice channel join/leave/move events to Kafka."""
     try:
         if before.channel is None and after.channel is not None:
-            await analytics.log_voice_event(member, after.channel, member.guild, 'join')
+            await kafka.send_voice_event(member, after.channel, member.guild, 'join')
         elif before.channel is not None and after.channel is None:
-            await analytics.log_voice_event(member, before.channel, member.guild, 'leave')
+            await kafka.send_voice_event(member, before.channel, member.guild, 'leave')
         elif before.channel != after.channel:
-            await analytics.log_voice_event(member, before.channel, member.guild, 'leave')
-            await analytics.log_voice_event(member, after.channel, member.guild, 'join')
+            await kafka.send_voice_event(member, before.channel, member.guild, 'leave')
+            await kafka.send_voice_event(member, after.channel, member.guild, 'join')
         elif before.self_mute != after.self_mute:
             event = 'mute' if after.self_mute else 'unmute'
-            await analytics.log_voice_event(member, after.channel, member.guild, event)
+            await kafka.send_voice_event(member, after.channel, member.guild, event)
         elif before.self_deaf != after.self_deaf:
             event = 'deafen' if after.self_deaf else 'undeafen'
-            await analytics.log_voice_event(member, after.channel, member.guild, event)
+            await kafka.send_voice_event(member, after.channel, member.guild, event)
     except Exception:
         pass
 
 @bot.event
 async def on_reaction_add(reaction, user):
-    """Log reaction adds."""
+    """Log reaction adds to Kafka."""
     try:
-        await analytics.log_reaction(reaction, user, 'add')
+        await kafka.send_reaction_event(reaction, user, 'add')
     except Exception:
         pass
 
 @bot.event
 async def on_reaction_remove(reaction, user):
-    """Log reaction removals."""
+    """Log reaction removals to Kafka."""
     try:
-        await analytics.log_reaction(reaction, user, 'remove')
+        await kafka.send_reaction_event(reaction, user, 'remove')
     except Exception:
         pass
 
 @bot.event
 async def on_presence_update(before, after):
-    """Log activity/game changes."""
+    """Log activity/game changes to Kafka."""
     try:
-        # Only log when activities change
         if before.activities != after.activities:
             for activity in after.activities:
-                await analytics.log_presence(after, activity)
+                await kafka.send_presence_event(after, activity)
     except Exception:
         pass
 
