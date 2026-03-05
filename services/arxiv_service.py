@@ -30,16 +30,12 @@ class ArxivService:
         cats = categories or DEFAULT_CATEGORIES
         cat_query = "+OR+".join(f"cat:{c}" for c in cats)
 
-        params = {
-            "search_query": cat_query,
-            "sortBy": "submittedDate",
-            "sortOrder": "descending",
-            "max_results": limit,
-        }
+        # Build URL manually to avoid aiohttp double-encoding the +OR+ operators
+        url = f"{self.BASE_URL}?search_query={cat_query}&sortBy=submittedDate&sortOrder=descending&max_results={limit}"
 
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.get(self.BASE_URL, params=params) as response:
+                async with session.get(url) as response:
                     if response.status != 200:
                         return f"Error fetching arXiv papers: HTTP {response.status}"
 
