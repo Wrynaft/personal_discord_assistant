@@ -23,3 +23,6 @@ _news_channel = os.getenv("NEWS_CHANNEL_ID")
 NEWS_CHANNEL_ID = int(_news_channel) if _news_channel else None
 if not NEWS_CHANNEL_ID:
     print("Warning: NEWS_CHANNEL_ID not set. Daily scheduled news will not run.")
+
+# PostgreSQL connection for analytics (optional — analytics disabled if not set)
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://discord:discord_analytics_2026@localhost:5432/discord_analytics")

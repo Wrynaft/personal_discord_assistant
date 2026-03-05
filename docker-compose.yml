@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: discord_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: discord_analytics
+      POSTGRES_USER: discord
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-discord_analytics_2026}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U discord -d discord_analytics"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
