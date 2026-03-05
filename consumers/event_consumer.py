@@ -14,6 +14,7 @@ import sys
 import os
 import json
 import asyncio
+from datetime import datetime, timezone
 
 # Add project root to path so we can import config and services
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -33,6 +34,16 @@ async def get_db_pool():
     )
 
 
+def parse_ts(ts_str):
+    """Parse ISO timestamp string to datetime, or return current UTC time."""
+    if not ts_str:
+        return datetime.now(timezone.utc)
+    try:
+        return datetime.fromisoformat(ts_str)
+    except (ValueError, TypeError):
+        return datetime.now(timezone.utc)
+
+
 async def upsert_user(pool, event):
     """Upsert user dimension from event data."""
     await pool.execute(
@@ -44,7 +55,7 @@ async def upsert_user(pool, event):
             display_name = EXCLUDED.display_name,
             last_seen = NOW()
         """,
-        event["user_id"], event.get("username"), event.get("display_name"), event.get("is_bot", False),
+        int(event["user_id"]), event.get("username"), event.get("display_name"), event.get("is_bot", False),
     )
 
 
@@ -62,7 +73,8 @@ async def upsert_channel(pool, event):
             channel_type = EXCLUDED.channel_type,
             category = EXCLUDED.category
         """,
-        channel_id, event.get("channel_name"), event.get("channel_type"), event.get("category"), event.get("guild_id"),
+        int(channel_id), event.get("channel_name"), event.get("channel_type"), event.get("category"),
+        int(event["guild_id"]) if event.get("guild_id") else None,
     )
 
 
@@ -79,7 +91,7 @@ async def upsert_guild(pool, event):
             guild_name = EXCLUDED.guild_name,
             member_count = EXCLUDED.member_count
         """,
-        guild_id, event.get("guild_name"), event.get("member_count", 0),
+        int(guild_id), event.get("guild_name"), event.get("member_count", 0),
     )
 
 
@@ -96,16 +108,16 @@ async def handle_message(pool, event):
              has_attachment, has_embed, event_type, created_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         """,
-        event["message_id"],
-        event["user_id"],
-        event["channel_id"],
-        event["guild_id"],
+        int(event["message_id"]),
+        int(event["user_id"]),
+        int(event["channel_id"]),
+        int(event["guild_id"]),
         event.get("content_length", 0),
         event.get("word_count", 0),
         event.get("has_attachment", False),
         event.get("has_embed", False),
         event.get("event_type", "send"),
-        event.get("timestamp"),
+        parse_ts(event.get("timestamp")),
     )
 
 
@@ -121,9 +133,9 @@ async def handle_voice(pool, event):
         INSERT INTO fact_voice_events (user_id, channel_id, guild_id, event_type)
         VALUES ($1, $2, $3, $4)
         """,
-        event["user_id"],
-        event.get("channel_id"),
-        event.get("guild_id"),
+        int(event["user_id"]),
+        int(event["channel_id"]) if event.get("channel_id") else None,
+        int(event["guild_id"]) if event.get("guild_id") else None,
         event["event_type"],
     )
 
@@ -137,10 +149,10 @@ async def handle_reaction(pool, event):
         INSERT INTO fact_reactions (message_id, user_id, channel_id, guild_id, emoji, event_type)
         VALUES ($1, $2, $3, $4, $5, $6)
         """,
-        event["message_id"],
-        event["user_id"],
-        event.get("channel_id"),
-        event.get("guild_id"),
+        int(event["message_id"]),
+        int(event["user_id"]),
+        int(event["channel_id"]) if event.get("channel_id") else None,
+        int(event["guild_id"]) if event.get("guild_id") else None,
         event.get("emoji"),
         event["event_type"],
     )
@@ -155,10 +167,10 @@ async def handle_presence(pool, event):
         INSERT INTO fact_presence (user_id, activity_type, activity_name, guild_id)
         VALUES ($1, $2, $3, $4)
         """,
-        event["user_id"],
+        int(event["user_id"]),
         event.get("activity_type"),
         event.get("activity_name"),
-        event.get("guild_id"),
+        int(event["guild_id"]) if event.get("guild_id") else None,
     )
 
 
