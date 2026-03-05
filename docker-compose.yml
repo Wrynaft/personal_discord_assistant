@@ -19,34 +19,29 @@ services:
       retries: 5
 
   kafka:
-    image: bitnami/kafka:latest
+    image: apache/kafka:3.9.0
     container_name: discord_kafka
     restart: unless-stopped
     environment:
-      # KRaft mode (no ZooKeeper)
-      KAFKA_CFG_NODE_ID: 1
-      KAFKA_CFG_PROCESS_ROLES: broker,controller
-      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
-      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
-      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_KRAFT_CLUSTER_ID: discord-analytics-cluster-01
+      # KRaft mode is default in official image — no ZooKeeper needed
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
       # Auto-create topics
-      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       # Retention: keep events for 7 days
-      KAFKA_CFG_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_RETENTION_HOURS: 168
       # Memory tuning for small VPS
       KAFKA_HEAP_OPTS: "-Xmx1g -Xms512m"
     ports:
       - "9092:9092"
     volumes:
-      - kafka_data:/bitnami/kafka
-    healthcheck:
-      test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
+      - kafka_data:/var/lib/kafka/data
 
 volumes:
   postgres_data:
