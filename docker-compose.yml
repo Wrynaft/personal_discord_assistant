@@ -36,6 +36,10 @@ services:
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       # Retention: keep events for 7 days
       KAFKA_LOG_RETENTION_HOURS: 168
+      # Single-broker: must set replication factor to 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       # Memory tuning for small VPS
       KAFKA_HEAP_OPTS: "-Xmx1g -Xms512m"
     ports:
