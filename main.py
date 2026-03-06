@@ -496,6 +496,60 @@ async def dashboard(ctx):
     embed.set_footer(text="Powered by Apache Superset + PostgreSQL")
     await ctx.send(embed=embed)
 
+@bot.command()
+async def tldr(ctx, count: int = 50):
+    """Summarizes recent messages in this channel. Usage: !tldr [count]"""
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+
+    count = max(10, min(count, 200))  # Clamp between 10-200
+
+    async with ctx.typing():
+        # Fetch recent messages from the channel
+        messages = []
+        async for msg in ctx.channel.history(limit=count + 5):  # +5 to account for bot/command msgs
+            # Skip bot messages and commands
+            if msg.author.bot or msg.content.startswith("!"):
+                continue
+            if msg.content.strip():
+                author = msg.author.display_name
+                messages.append(f"{author}: {msg.content[:200]}")
+            if len(messages) >= count:
+                break
+
+        if len(messages) < 3:
+            await ctx.send("Not enough messages to summarize.")
+            return
+
+        # Reverse to chronological order
+        messages.reverse()
+
+        # Build LLM prompt
+        conversation = "\n".join(messages)
+        prompt = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a concise conversation summarizer. Summarize the following Discord conversation "
+                    "in 3-5 bullet points. Focus on the main topics discussed, key decisions, and any notable "
+                    "moments. Keep it brief and casual. Use Discord usernames when referencing people."
+                ),
+            },
+            {"role": "user", "content": f"Summarize this conversation:\n\n{conversation}"},
+        ]
+
+        summary = await llm_service.generate_response(prompt)
+
+        embed = discord.Embed(
+            title=f"📝 TL;DR — #{ctx.channel.name}",
+            description=summary,
+            color=0xE67E22,  # Orange
+        )
+        embed.set_footer(text=f"Summarized {len(messages)} messages • Powered by Groq")
+        embed.timestamp = datetime.now(MYT)
+        await ctx.send(embed=embed)
+
 @bot.event
 async def on_message(message):
     # Don't respond to ourselves
