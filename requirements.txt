@@ -5,3 +5,4 @@ aiohttp>=3.9.0
 ddgs>=6.0.0
 asyncpg>=0.29.0
 aiokafka>=0.10.0
+dbt-postgres>=1.7.0

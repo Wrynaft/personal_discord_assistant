@@ -1,0 +1,21 @@
+version: 2
+
+sources:
+  - name: raw
+    description: Raw Discord analytics tables populated by the Kafka consumer
+    schema: public
+    tables:
+      - name: fact_messages
+        description: Raw message events (send, edit, delete)
+      - name: fact_voice_events
+        description: Raw voice channel events (join, leave, mute, etc.)
+      - name: fact_reactions
+        description: Raw reaction events (add, remove)
+      - name: fact_presence
+        description: Raw presence/activity events (playing, streaming, etc.)
+      - name: dim_users
+        description: User dimension table
+      - name: dim_channels
+        description: Channel dimension table
+      - name: dim_guilds
+        description: Guild/server dimension table
