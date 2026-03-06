@@ -47,6 +47,39 @@ services:
     volumes:
       - kafka_data:/var/lib/kafka/data
 
+  redis:
+    image: redis:7-alpine
+    container_name: discord_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  superset:
+    image: apache/superset:3.1.3
+    container_name: discord_superset
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-discord-superset-secret-2026}
+      # Redis cache
+      REDIS_URL: redis://redis:6379/0
+      # Default admin credentials (change after first login!)
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: admin
+      ADMIN_EMAIL: admin@localhost
+    ports:
+      - "8088:8088"
+    volumes:
+      - superset_data:/app/superset_home
+      - ./superset/superset_init.sh:/app/superset_init.sh
+    command: ["/bin/bash", "/app/superset_init.sh"]
+
 volumes:
   postgres_data:
   kafka_data:
+  redis_data:
+  superset_data:

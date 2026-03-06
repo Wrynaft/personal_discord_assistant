@@ -7,6 +7,7 @@ from services.news_service import NewsService
 from services.hn_service import HNService
 from services.arxiv_service import ArxivService
 from services.kafka_producer import KafkaProducer
+from services.stats_service import StatsService
 from services import search_service
 
 # Malaysian Time = UTC+8
@@ -27,6 +28,7 @@ news_service = NewsService()
 hn_service = HNService()
 arxiv_service = ArxivService()
 kafka = KafkaProducer()
+stats_service = StatsService()
 
 # Store recent news context keyed by message ID for follow-up queries
 _news_context = {}
@@ -245,6 +247,13 @@ async def on_ready():
     except Exception as e:
         print(f'Warning: Kafka not available ({e}). Event streaming disabled.')
 
+    # Connect stats service (for !stats command)
+    try:
+        await stats_service.connect()
+        print('Stats: Connected to PostgreSQL')
+    except Exception as e:
+        print(f'Warning: Stats DB not available ({e}). !stats command disabled.')
+
     # Start daily schedulers
     if config.NEWS_CHANNEL_ID:
         if not daily_news.is_running():
@@ -335,6 +344,57 @@ async def search(ctx, *, query: str):
             color=0x2ECC71,  # Green
         )
         embed.set_footer(text="Powered by DuckDuckGo + Groq")
+        await ctx.send(embed=embed)
+
+@bot.command()
+async def stats(ctx):
+    """Shows server activity stats. Usage: !stats"""
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+
+    async with ctx.typing():
+        data = await stats_service.get_server_stats(ctx.guild.id)
+        if not data:
+            await ctx.send("Analytics not available. Make sure PostgreSQL is running.")
+            return
+
+        today = datetime.now(MYT).strftime("%B %d, %Y")
+
+        embed = discord.Embed(
+            title=f"📊 Server Activity — {ctx.guild.name}",
+            color=0x3498DB,  # Blue
+        )
+
+        # Overview
+        embed.add_field(
+            name="📨 Messages",
+            value=f"Today: **{data['messages_today']}**\nThis week: **{data['messages_week']}**\nAll time: **{data['total_messages']}**",
+            inline=True,
+        )
+        embed.add_field(
+            name="👥 Activity",
+            value=f"Active users (week): **{data['active_users_week']}**\nVoice joins (week): **{data['voice_joins_week']}**",
+            inline=True,
+        )
+
+        # Top users
+        if data['top_users']:
+            users_text = "\n".join(f"`{i}.` {u} — {c} msgs" for i, (u, c) in enumerate(data['top_users'], 1))
+            embed.add_field(name="🏆 Top Users (Week)", value=users_text, inline=False)
+
+        # Top channels
+        if data['top_channels']:
+            channels_text = "\n".join(f"`{i}.` #{ch} — {c} msgs" for i, (ch, c) in enumerate(data['top_channels'], 1))
+            embed.add_field(name="💬 Top Channels (Week)", value=channels_text, inline=False)
+
+        # Top games
+        if data['top_games']:
+            games_text = "\n".join(f"`{i}.` {g} ({c}x)" for i, (g, c) in enumerate(data['top_games'], 1))
+            embed.add_field(name="🎮 Most Played Games (Week)", value=games_text, inline=False)
+
+        embed.set_footer(text=f"{today} • Data powered by Kafka + PostgreSQL")
+        embed.timestamp = datetime.now(MYT)
         await ctx.send(embed=embed)
 
 @bot.event
