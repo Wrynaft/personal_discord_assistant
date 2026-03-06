@@ -8,6 +8,7 @@ from services.hn_service import HNService
 from services.arxiv_service import ArxivService
 from services.kafka_producer import KafkaProducer
 from services.stats_service import StatsService
+from services.sentiment_service import SentimentService
 from services import search_service
 
 # Malaysian Time = UTC+8
@@ -29,6 +30,7 @@ hn_service = HNService()
 arxiv_service = ArxivService()
 kafka = KafkaProducer()
 stats_service = StatsService()
+sentiment_svc = SentimentService()
 
 # Store recent news context keyed by message ID for follow-up queries
 _news_context = {}
@@ -254,6 +256,13 @@ async def on_ready():
     except Exception as e:
         print(f'Warning: Stats DB not available ({e}). !stats command disabled.')
 
+    # Connect sentiment service
+    try:
+        await sentiment_svc.connect()
+        print('Sentiment: Connected to PostgreSQL')
+    except Exception as e:
+        print(f'Warning: Sentiment DB not available ({e}). !sentiment command disabled.')
+
     # Start daily schedulers
     if config.NEWS_CHANNEL_ID:
         if not daily_news.is_running():
@@ -396,6 +405,96 @@ async def stats(ctx):
         embed.set_footer(text=f"{today} • Data powered by Kafka + PostgreSQL")
         embed.timestamp = datetime.now(MYT)
         await ctx.send(embed=embed)
+
+@bot.command()
+async def sentiment(ctx):
+    """Shows server sentiment analysis. Usage: !sentiment"""
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+
+    async with ctx.typing():
+        data = await sentiment_svc.get_channel_sentiment(ctx.guild.id)
+        if not data:
+            await ctx.send("No sentiment data available yet. Messages need to be scored first.")
+            return
+
+        # Emoji for each score
+        score_emoji = {1: "😡", 2: "😟", 3: "😐", 4: "😊", 5: "😄"}
+        score_label = {1: "Very Negative", 2: "Negative", 3: "Neutral", 4: "Positive", 5: "Very Positive"}
+
+        # Overall score emoji
+        avg = data['avg_score']
+        if avg >= 4.5:
+            mood = "😄 Very Positive"
+        elif avg >= 3.5:
+            mood = "😊 Positive"
+        elif avg >= 2.5:
+            mood = "😐 Neutral"
+        elif avg >= 1.5:
+            mood = "😟 Negative"
+        else:
+            mood = "😡 Very Negative"
+
+        embed = discord.Embed(
+            title=f"🧠 Sentiment Analysis — {ctx.guild.name}",
+            description=f"**Overall Mood: {mood}**\nAverage Score: **{avg}/5.0**\nMessages Scored: **{data['total_scored']}**",
+            color=0x9B59B6,  # Purple
+        )
+
+        # Distribution bar chart
+        dist = data['distribution']
+        total = data['total_scored']
+        bars = []
+        for score in range(1, 6):
+            count = dist.get(score, 0)
+            pct = (count / total * 100) if total > 0 else 0
+            bar_len = int(pct / 5)  # Scale to max 20 chars
+            bar = "█" * bar_len
+            bars.append(f"{score_emoji[score]} {score_label[score]}: {bar} {count} ({pct:.0f}%)")
+
+        embed.add_field(name="📊 Sentiment Distribution", value="\n".join(bars), inline=False)
+
+        # Channel rankings
+        rankings = await sentiment_svc.get_channel_rankings(ctx.guild.id)
+        if rankings:
+            rank_text = "\n".join(
+                f"`{i}.` #{ch} — {s}/5.0 ({n} msgs)"
+                for i, (ch, s, n) in enumerate(rankings[:5], 1)
+            )
+            embed.add_field(name="🏆 Happiest Channels", value=rank_text, inline=False)
+
+        embed.set_footer(text="Sentiment scored by LLM • Updated periodically")
+        embed.timestamp = datetime.now(MYT)
+        await ctx.send(embed=embed)
+
+@bot.command()
+async def dashboard(ctx):
+    """Links to the Superset analytics dashboard. Usage: !dashboard"""
+    superset_url = config.SUPERSET_URL
+    if not superset_url:
+        await ctx.send("Dashboard URL not configured. Set `SUPERSET_URL` in your .env file.")
+        return
+
+    embed = discord.Embed(
+        title="📊 Analytics Dashboard",
+        description=f"View the full server analytics dashboard:\n\n🔗 **[Open Dashboard]({superset_url})**",
+        color=0x2ECC71,  # Green
+    )
+    embed.add_field(
+        name="Available Views",
+        value=(
+            "• 📈 Activity trends\n"
+            "• 🏆 User leaderboard\n"
+            "• 🔥 Hourly activity heatmap\n"
+            "• 🎮 Gaming stats\n"
+            "• 💬 Channel health\n"
+            "• 🧠 Sentiment analysis"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Powered by Apache Superset + PostgreSQL")
+    await ctx.send(embed=embed)
 
 @bot.event
 async def on_message(message):

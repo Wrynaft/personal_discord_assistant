@@ -51,6 +51,7 @@ class KafkaProducer:
             "guild_name": message.guild.name,
             "member_count": message.guild.member_count,
             "content_length": len(message.content or ""),
+            "content_preview": (message.content or "")[:200],  # Truncated for sentiment scoring
             "word_count": len((message.content or "").split()) if message.content else 0,
             "has_attachment": bool(message.attachments),
             "has_embed": bool(message.embeds),

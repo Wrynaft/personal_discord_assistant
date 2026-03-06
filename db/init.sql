@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS fact_messages (
     has_attachment  BOOLEAN DEFAULT FALSE,
     has_embed       BOOLEAN DEFAULT FALSE,
     event_type      VARCHAR(20) DEFAULT 'send',  -- send, edit, delete
+    content_preview VARCHAR(200),                -- first 200 chars for sentiment scoring
+    sentiment_score SMALLINT,                    -- 1=very negative, 5=very positive, NULL=unscored
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 

@@ -26,3 +26,6 @@ if not NEWS_CHANNEL_ID:
 
 # PostgreSQL connection for analytics (optional — analytics disabled if not set)
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://discord:discord_analytics_2026@localhost:5432/discord_analytics")
+
+# Superset dashboard URL (for !dashboard command)
+SUPERSET_URL = os.getenv("SUPERSET_URL", "")

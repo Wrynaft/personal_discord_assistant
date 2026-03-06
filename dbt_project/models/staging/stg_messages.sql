@@ -12,6 +12,7 @@ SELECT
     has_attachment,
     has_embed,
     event_type,
+    sentiment_score,
     created_at,
     DATE(created_at) AS message_date,
     EXTRACT(HOUR FROM created_at) AS message_hour,

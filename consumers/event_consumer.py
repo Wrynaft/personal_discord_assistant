@@ -105,8 +105,8 @@ async def handle_message(pool, event):
         """
         INSERT INTO fact_messages
             (message_id, user_id, channel_id, guild_id, content_length, word_count,
-             has_attachment, has_embed, event_type, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             has_attachment, has_embed, event_type, content_preview, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         """,
         int(event["message_id"]),
         int(event["user_id"]),
@@ -117,6 +117,7 @@ async def handle_message(pool, event):
         event.get("has_attachment", False),
         event.get("has_embed", False),
         event.get("event_type", "send"),
+        (event.get("content_preview") or "")[:200] or None,
         parse_ts(event.get("timestamp")),
     )
 
