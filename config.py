@@ -29,3 +29,8 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://discord:discord_analytics
 
 # Superset dashboard URL (for !dashboard command)
 SUPERSET_URL = os.getenv("SUPERSET_URL", "")
+
+# Danbooru daily posts
+_danbooru_channel = os.getenv("DANBOORU_CHANNEL_ID")
+DANBOORU_CHANNEL_ID = int(_danbooru_channel) if _danbooru_channel else None
+DANBOORU_DEFAULT_TAGS = os.getenv("DANBOORU_DEFAULT_TAGS", "")

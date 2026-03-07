@@ -9,6 +9,7 @@ from services.arxiv_service import ArxivService
 from services.kafka_producer import KafkaProducer
 from services.stats_service import StatsService
 from services.sentiment_service import SentimentService
+from services.danbooru_service import DanbooruService
 from services import search_service
 
 # Malaysian Time = UTC+8
@@ -31,6 +32,7 @@ arxiv_service = ArxivService()
 kafka = KafkaProducer()
 stats_service = StatsService()
 sentiment_svc = SentimentService()
+danbooru = DanbooruService()
 
 # Store recent news context keyed by message ID for follow-up queries
 _news_context = {}
@@ -275,6 +277,11 @@ async def on_ready():
             daily_papers.start()
             print(f'Daily papers scheduled for 9:30 AM MYT in channel {config.NEWS_CHANNEL_ID}')
 
+    if config.DANBOORU_CHANNEL_ID:
+        if not daily_danbooru.is_running():
+            daily_danbooru.start()
+            print(f'Daily Danbooru scheduled for 9:45 PM MYT in channel {config.DANBOORU_CHANNEL_ID}')
+
 @tasks.loop(time=time(hour=9, minute=0, tzinfo=MYT))
 async def daily_news():
     """Automatically posts tech news digest at 9:00 AM MYT every day."""
@@ -302,9 +309,104 @@ async def daily_papers():
         return
     await post_papers_digest(channel)
 
+@tasks.loop(time=time(hour=21, minute=45, tzinfo=MYT))
+async def daily_danbooru():
+    """Automatically posts top Danbooru art at 9:45 PM MYT every day."""
+    channel = bot.get_channel(config.DANBOORU_CHANNEL_ID)
+    if not channel:
+        print(f"Error: Could not find Danbooru channel {config.DANBOORU_CHANNEL_ID}")
+        return
+    await post_danbooru_digest(channel)
+
 @bot.command()
 async def ping(ctx):
     await ctx.send('Pong!')
+
+
+async def post_danbooru_digest(destination):
+    """Fetch and post top Danbooru art."""
+    posts = await danbooru.get_top_posts(
+        tags=config.DANBOORU_DEFAULT_TAGS,
+        limit=5,
+    )
+
+    if not posts:
+        await destination.send("No Danbooru posts found for today. Try again later!")
+        return
+
+    embed = discord.Embed(
+        title="\U0001f3a8 Today's Top Danbooru Art",
+        color=0xE91E63,  # Pink
+    )
+
+    for i, post in enumerate(posts, 1):
+        # Character/copyright info
+        info_parts = []
+        if post['character']:
+            info_parts.append(post['character'].split(' ')[0])  # First character
+        if post['copyright']:
+            info_parts.append(post['copyright'].split(' ')[0])  # First copyright
+        info = " \u2022 ".join(info_parts) if info_parts else "Original"
+
+        embed.add_field(
+            name=f"{i}. {info} (Score: {post['score']})",
+            value=f"[View Post]({post['page_url']}) \u2022 Artist: {post['artist'].split(' ')[0]} \u2022 {danbooru.rating_emoji(post['rating'])}",
+            inline=False,
+        )
+
+    # Set the first post's image as the embed thumbnail
+    if posts:
+        embed.set_image(url=posts[0]['file_url'])
+
+    embed.set_footer(text="Powered by Danbooru API")
+    embed.timestamp = datetime.now(MYT)
+    await destination.send(embed=embed)
+
+
+@bot.command(name="danbooru")
+async def danbooru_cmd(ctx, *, tags: str = ""):
+    """Fetches a top Danbooru post. Usage: !danbooru [tags]"""
+    async with ctx.typing():
+        if tags:
+            # Limit to 2 tags for free tier
+            tag_list = tags.strip().split()
+            if len(tag_list) > 2:
+                await ctx.send("\u26a0\ufe0f Danbooru free tier allows max 2 tags. Using the first 2.")
+                tags = " ".join(tag_list[:2])
+
+            post = await danbooru.get_random_top_post(tags=tags)
+        else:
+            post = await danbooru.get_random_top_post()
+
+        if not post:
+            await ctx.send("No posts found. Try different tags or try again later.")
+            return
+
+        # Character/copyright info
+        info_parts = []
+        if post['character']:
+            info_parts.append(post['character'].replace(' ', ', '))
+        if post['copyright']:
+            info_parts.append(post['copyright'].replace(' ', ', '))
+        info = " \u2022 ".join(info_parts) if info_parts else "Original"
+
+        embed = discord.Embed(
+            title=f"\U0001f3a8 {info}",
+            url=post['page_url'],
+            color=0xE91E63,  # Pink
+        )
+        embed.set_image(url=post['file_url'])
+        embed.add_field(
+            name="Details",
+            value=f"Score: **{post['score']}** \u2022 Artist: **{post['artist'].split(' ')[0]}** \u2022 {danbooru.rating_emoji(post['rating'])}",
+            inline=False,
+        )
+        if tags:
+            embed.set_footer(text=f"Tags: {tags} \u2022 Powered by Danbooru")
+        else:
+            embed.set_footer(text="Powered by Danbooru")
+        embed.timestamp = datetime.now(MYT)
+        await ctx.send(embed=embed)
 
 @bot.command()
 async def news(ctx):
