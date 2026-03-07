@@ -282,6 +282,13 @@ async def on_ready():
             daily_danbooru.start()
             print(f'Daily Danbooru scheduled for 9:45 PM MYT in channel {config.DANBOORU_CHANNEL_ID}')
 
+    # Sync slash commands with Discord
+    try:
+        synced = await bot.tree.sync()
+        print(f'Synced {len(synced)} slash commands')
+    except Exception as e:
+        print(f'Failed to sync slash commands: {e}')
+
 @tasks.loop(time=time(hour=9, minute=0, tzinfo=MYT))
 async def daily_news():
     """Automatically posts tech news digest at 9:00 AM MYT every day."""
@@ -318,7 +325,7 @@ async def daily_danbooru():
         return
     await post_danbooru_digest(channel)
 
-@bot.command()
+@bot.hybrid_command(description="Check if the bot is alive")
 async def ping(ctx):
     await ctx.send('Pong!')
 
@@ -363,7 +370,7 @@ async def post_danbooru_digest(destination):
     await destination.send(embed=embed)
 
 
-@bot.command(name="danbooru")
+@bot.hybrid_command(name="danbooru", description="Fetch a top Danbooru post with optional tag search")
 async def danbooru_cmd(ctx, *, tags: str = ""):
     """Fetches a top Danbooru post. Usage: !danbooru [tags]"""
     async with ctx.typing():
@@ -416,25 +423,25 @@ async def danbooru_cmd(ctx, *, tags: str = ""):
         else:
             await ctx.send(embed=embed)
 
-@bot.command()
+@bot.hybrid_command(description="Fetch the latest tech news digest")
 async def news(ctx):
     """Fetches the latest tech news and summarizes it using the LLM."""
     async with ctx.typing():
         await post_news_digest(ctx)
 
-@bot.command()
+@bot.hybrid_command(description="Fetch top Hacker News stories")
 async def hn(ctx):
     """Fetches top Hacker News stories and summarizes them. Usage: !hn"""
     async with ctx.typing():
         await post_hn_digest(ctx)
 
-@bot.command()
+@bot.hybrid_command(description="Fetch latest CS/AI research papers from arXiv")
 async def papers(ctx):
     """Fetches latest CS/AI research papers from arXiv. Usage: !papers"""
     async with ctx.typing():
         await post_papers_digest(ctx)
 
-@bot.command()
+@bot.hybrid_command(description="Search the web and get an AI-grounded answer")
 async def search(ctx, *, query: str):
     """Searches the web and provides a grounded answer. Usage: !search <query>"""
     async with ctx.typing():
@@ -465,7 +472,7 @@ async def search(ctx, *, query: str):
         embed.set_footer(text="Powered by DuckDuckGo + Groq")
         await ctx.send(embed=embed)
 
-@bot.command()
+@bot.hybrid_command(description="Show server activity stats")
 async def stats(ctx):
     """Shows server activity stats. Usage: !stats"""
     if not ctx.guild:
@@ -516,7 +523,7 @@ async def stats(ctx):
         embed.timestamp = datetime.now(MYT)
         await ctx.send(embed=embed)
 
-@bot.command()
+@bot.hybrid_command(description="Show server sentiment analysis")
 async def sentiment(ctx):
     """Shows server sentiment analysis. Usage: !sentiment"""
     if not ctx.guild:
@@ -578,7 +585,7 @@ async def sentiment(ctx):
         embed.timestamp = datetime.now(MYT)
         await ctx.send(embed=embed)
 
-@bot.command()
+@bot.hybrid_command(description="Link to the Superset analytics dashboard")
 async def dashboard(ctx):
     """Links to the Superset analytics dashboard. Usage: !dashboard"""
     superset_url = config.SUPERSET_URL
@@ -606,7 +613,7 @@ async def dashboard(ctx):
     embed.set_footer(text="Powered by Apache Superset + PostgreSQL")
     await ctx.send(embed=embed)
 
-@bot.command()
+@bot.hybrid_command(description="Summarize recent messages in this channel")
 async def tldr(ctx, count: int = 50):
     """Summarizes recent messages in this channel. Usage: !tldr [count]"""
     if not ctx.guild:
