@@ -88,6 +88,69 @@ class DanbooruService:
             print(f"Error fetching Danbooru posts: {e}")
             return []
 
+    async def autocomplete_tag(self, query, limit=5):
+        """
+        Use Danbooru's autocomplete API to fuzzy-match a tag.
+        
+        Args:
+            query: Partial tag string (e.g., "hatsu", "genshn")
+            limit: Max suggestions to return
+        Returns:
+            list of dicts with keys: name, post_count
+        """
+        await self._ensure_session()
+
+        params = {
+            "search[query]": query,
+            "search[type]": "tag_query",
+            "limit": limit,
+        }
+
+        try:
+            async with self.session.get(f"{BASE_URL}/autocomplete.json", params=params) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                return [
+                    {"name": item.get("value", ""), "post_count": item.get("post_count", 0)}
+                    for item in data
+                    if item.get("value")
+                ]
+        except Exception as e:
+            print(f"Danbooru autocomplete error: {e}")
+            return []
+
+    async def resolve_tags(self, user_input):
+        """
+        Resolve user-typed tags to valid Danbooru tags using autocomplete.
+
+        Args:
+            user_input: Raw tag string from user (e.g., "hatsu genshn")
+        Returns:
+            (resolved_tags: str, corrections: list of (original, corrected) tuples)
+        """
+        tags = user_input.strip().replace(",", " ").split()
+        resolved = []
+        corrections = []
+
+        for tag in tags[:2]:  # Max 2 tags (free tier)
+            # Normalize: spaces to underscores
+            tag = tag.strip().replace(" ", "_").lower()
+
+            # Try autocomplete
+            suggestions = await self.autocomplete_tag(tag, limit=1)
+
+            if suggestions:
+                best = suggestions[0]["name"]
+                if best.lower() != tag.lower():
+                    corrections.append((tag, best))
+                resolved.append(best)
+            else:
+                # No match — use as-is
+                resolved.append(tag)
+
+        return " ".join(resolved), corrections
+
     async def get_random_top_post(self, tags=""):
         """Fetch a single random post from today's top 20."""
         import random

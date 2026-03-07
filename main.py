@@ -367,12 +367,16 @@ async def post_danbooru_digest(destination):
 async def danbooru_cmd(ctx, *, tags: str = ""):
     """Fetches a top Danbooru post. Usage: !danbooru [tags]"""
     async with ctx.typing():
+        correction_msg = ""
+
         if tags:
-            # Limit to 2 tags for free tier
-            tag_list = tags.strip().split()
-            if len(tag_list) > 2:
-                await ctx.send("\u26a0\ufe0f Danbooru free tier allows max 2 tags. Using the first 2.")
-                tags = " ".join(tag_list[:2])
+            # Fuzzy-match tags via Danbooru autocomplete
+            resolved, corrections = await danbooru.resolve_tags(tags)
+            tags = resolved
+
+            if corrections:
+                fixes = ", ".join(f"**{orig}** → **{fixed}**" for orig, fixed in corrections)
+                correction_msg = f"🔍 Auto-corrected: {fixes}\n"
 
             post = await danbooru.get_random_top_post(tags=tags)
         else:
@@ -406,7 +410,11 @@ async def danbooru_cmd(ctx, *, tags: str = ""):
         else:
             embed.set_footer(text="Powered by Danbooru")
         embed.timestamp = datetime.now(MYT)
-        await ctx.send(embed=embed)
+
+        if correction_msg:
+            await ctx.send(correction_msg, embed=embed)
+        else:
+            await ctx.send(embed=embed)
 
 @bot.command()
 async def news(ctx):
