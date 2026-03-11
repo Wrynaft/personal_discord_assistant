@@ -678,7 +678,7 @@ async def tldr(ctx, count: int = 50):
 
 @bot.hybrid_command(description="Mimic a user's speech style")
 async def mimic(ctx, user: discord.Member, *, prompt: str = ""):
-    """Mimic a user's speech pattern. Usage: !mimic @user <what to say>"""
+    """Mimic a user's speech pattern. Usage: !mimic @user [optional prompt]"""
     if not ctx.guild:
         await ctx.send("This command only works in a server.")
         return
@@ -688,13 +688,13 @@ async def mimic(ctx, user: discord.Member, *, prompt: str = ""):
         async with ctx.typing():
             msg_count = await mimic_svc.get_message_count(user.id, ctx.guild.id)
             if msg_count < 10:
-                await ctx.send(f"⚠️ {user.display_name} doesn't have enough messages yet ({msg_count}/10 minimum).")
+                await ctx.send(f"\u26a0\ufe0f {user.display_name} doesn't have enough messages yet ({msg_count}/10 minimum).")
                 return
 
             profile = await mimic_svc.build_style_profile(user.id, ctx.guild.id)
             if profile:
                 embed = discord.Embed(
-                    title=f"🎭 Style Profile — {user.display_name}",
+                    title=f"\ud83c\udfad Style Profile \u2014 {user.display_name}",
                     description=profile,
                     color=0x9B59B6,
                 )
@@ -704,12 +704,8 @@ async def mimic(ctx, user: discord.Member, *, prompt: str = ""):
                 await ctx.send("Failed to build profile. Try again later.")
         return
 
-    if not prompt:
-        await ctx.send("Usage: `!mimic @user what do you think about...`\nOr: `!mimic @user profile` to view/rebuild their style profile.")
-        return
-
     if user.bot:
-        await ctx.send("I can't mimic other bots! 🤖")
+        await ctx.send("I can't mimic other bots! \ud83e\udd16")
         return
 
     async with ctx.typing():
@@ -717,19 +713,36 @@ async def mimic(ctx, user: discord.Member, *, prompt: str = ""):
         msg_count = await mimic_svc.get_message_count(user.id, ctx.guild.id)
         if msg_count < 10:
             await ctx.send(
-                f"⚠️ {user.display_name} doesn't have enough messages yet "
+                f"\u26a0\ufe0f {user.display_name} doesn't have enough messages yet "
                 f"({msg_count}/10 minimum). Keep chatting and try again later!"
             )
             return
 
-        response = await mimic_svc.mimic_user(user.id, ctx.guild.id, prompt)
+        # If no prompt given, read recent channel messages for context
+        conversation_context = None
+        if not prompt:
+            messages_list = []
+            async for msg in ctx.channel.history(limit=25):
+                if msg.author.bot or msg.content.startswith("!") or msg.content.startswith("/"):
+                    continue
+                if msg.content.strip():
+                    messages_list.append(f"{msg.author.display_name}: {msg.content[:200]}")
+                if len(messages_list) >= 20:
+                    break
+            messages_list.reverse()  # Chronological order
+            if messages_list:
+                conversation_context = messages_list
+
+        response = await mimic_svc.mimic_user(
+            user.id, ctx.guild.id,
+            prompt_text=prompt if prompt else None,
+            conversation_context=conversation_context,
+        )
 
         if not response:
             await ctx.send("Couldn't generate a response. The user might not have enough message history.")
             return
 
-        # Send as a webhook-style message with the user's avatar (if possible)
-        # or as a styled embed
         embed = discord.Embed(
             description=response,
             color=user.color if user.color != discord.Color.default() else 0x95A5A6,

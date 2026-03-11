@@ -29,7 +29,27 @@ Return a concise style guide (max 200 words) that another AI could use to perfec
 Messages:
 """
 
-MIMIC_PROMPT = """You are mimicking a Discord user's texting style. Here is their style profile:
+MIMIC_CONTEXT_PROMPT = """You are mimicking a Discord user's texting style. Here is their style profile:
+
+{profile}
+
+Here are some example messages from this person for reference:
+{examples}
+
+Here is the recent conversation in the channel:
+{conversation}
+
+RULES:
+- Match their exact style: capitalization, punctuation, emoji usage, slang, message length
+- Stay in character — respond as this person would
+- Keep the message natural and casual, like a real Discord message
+- Do NOT mention that you are an AI or mimicking someone
+- IMPORTANT: Actually engage with the conversation. Give an opinion, react to what's being discussed, or add to the topic. NEVER give dismissive non-answers like "idk", "no idea", "don't know", "not sure". Even if the real person might say that, YOU should always provide an entertaining, on-topic response in their style.
+- Keep your response to 1-3 short messages (separated by newlines) like a real person would type
+
+Now jump into this conversation as this person. What would they say next?"""
+
+MIMIC_PROMPT_DIRECT = """You are mimicking a Discord user's texting style. Here is their style profile:
 
 {profile}
 
@@ -41,7 +61,8 @@ RULES:
 - Stay in character — respond as this person would
 - Keep the message natural and casual, like a real Discord message
 - Do NOT mention that you are an AI or mimicking someone
-- Keep your response to 1-3 messages (separated by newlines) like a real person would type
+- IMPORTANT: Actually engage with the topic. Give an opinion, share a thought, or react meaningfully. NEVER give dismissive non-answers like "idk", "no idea", "don't know". Always provide an entertaining, on-topic response in their style.
+- Keep your response to 1-3 short messages (separated by newlines) like a real person would type
 
 Now respond to this in their style:
 {prompt}"""
@@ -150,14 +171,15 @@ class MimicService:
 
         return [row["content_preview"] for row in rows]
 
-    async def mimic_user(self, user_id, guild_id, prompt_text):
+    async def mimic_user(self, user_id, guild_id, prompt_text=None, conversation_context=None):
         """
         Generate a response mimicking a user's style.
         
         Args:
             user_id: Discord user ID to mimic
             guild_id: Guild ID for context
-            prompt_text: The topic/question to respond to
+            prompt_text: Optional direct prompt to respond to
+            conversation_context: Optional list of recent channel messages (author: content)
         Returns:
             str: Generated response in the user's style, or None if not enough data
         """
@@ -173,16 +195,24 @@ class MimicService:
 
         examples_text = "\n".join(f"- {msg}" for msg in examples)
 
-        # Build the mimic prompt
-        full_prompt = MIMIC_PROMPT.format(
-            profile=profile,
-            examples=examples_text,
-            prompt=prompt_text,
-        )
+        # Choose prompt template based on mode
+        if conversation_context:
+            convo_text = "\n".join(conversation_context)
+            full_prompt = MIMIC_CONTEXT_PROMPT.format(
+                profile=profile,
+                examples=examples_text,
+                conversation=convo_text,
+            )
+        else:
+            full_prompt = MIMIC_PROMPT_DIRECT.format(
+                profile=profile,
+                examples=examples_text,
+                prompt=prompt_text or "Say something random",
+            )
 
         messages = [
             {"role": "system", "content": full_prompt},
-            {"role": "user", "content": prompt_text},
+            {"role": "user", "content": "Respond now."},
         ]
 
         return await self.llm.generate_response(messages)
