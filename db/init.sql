@@ -78,12 +78,24 @@ CREATE TABLE IF NOT EXISTS fact_presence (
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Style profiles for user mimicry
+CREATE TABLE IF NOT EXISTS user_style_profiles (
+    id          BIGSERIAL PRIMARY KEY,
+    user_id     BIGINT NOT NULL,
+    guild_id    BIGINT NOT NULL,
+    profile     TEXT NOT NULL,
+    sample_size INT DEFAULT 0,
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(user_id, guild_id)
+);
+
 -- =============================================
 -- Indexes for common queries
 -- =============================================
 CREATE INDEX IF NOT EXISTS idx_messages_user      ON fact_messages(user_id);
 CREATE INDEX IF NOT EXISTS idx_messages_channel   ON fact_messages(channel_id);
-CREATE INDEX IF NOT EXISTS idx_messages_time      ON fact_messages(created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_sentiment ON fact_messages(sentiment_score);
 CREATE INDEX IF NOT EXISTS idx_voice_user         ON fact_voice_events(user_id);
 CREATE INDEX IF NOT EXISTS idx_voice_time         ON fact_voice_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_reactions_message   ON fact_reactions(message_id);

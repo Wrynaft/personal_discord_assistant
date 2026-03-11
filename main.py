@@ -10,6 +10,7 @@ from services.kafka_producer import KafkaProducer
 from services.stats_service import StatsService
 from services.sentiment_service import SentimentService
 from services.danbooru_service import DanbooruService
+from services.mimic_service import MimicService
 from services import search_service
 
 # Malaysian Time = UTC+8
@@ -33,6 +34,7 @@ kafka = KafkaProducer()
 stats_service = StatsService()
 sentiment_svc = SentimentService()
 danbooru = DanbooruService()
+mimic_svc = MimicService()
 
 # Store recent news context keyed by message ID for follow-up queries
 _news_context = {}
@@ -264,6 +266,13 @@ async def on_ready():
         print('Sentiment: Connected to PostgreSQL')
     except Exception as e:
         print(f'Warning: Sentiment DB not available ({e}). !sentiment command disabled.')
+
+    # Connect mimic service
+    try:
+        await mimic_svc.connect()
+        print('Mimic: Connected to PostgreSQL')
+    except Exception as e:
+        print(f'Warning: Mimic DB not available ({e}). !mimic command disabled.')
 
     # Start daily schedulers
     if config.NEWS_CHANNEL_ID:
@@ -665,6 +674,71 @@ async def tldr(ctx, count: int = 50):
         )
         embed.set_footer(text=f"Summarized {len(messages)} messages • Powered by Groq")
         embed.timestamp = datetime.now(MYT)
+        await ctx.send(embed=embed)
+
+@bot.hybrid_command(description="Mimic a user's speech style")
+async def mimic(ctx, user: discord.Member, *, prompt: str = ""):
+    """Mimic a user's speech pattern. Usage: !mimic @user <what to say>"""
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+
+    # Handle profile rebuild subcommand
+    if prompt.strip().lower() == "profile":
+        async with ctx.typing():
+            msg_count = await mimic_svc.get_message_count(user.id, ctx.guild.id)
+            if msg_count < 10:
+                await ctx.send(f"⚠️ {user.display_name} doesn't have enough messages yet ({msg_count}/10 minimum).")
+                return
+
+            profile = await mimic_svc.build_style_profile(user.id, ctx.guild.id)
+            if profile:
+                embed = discord.Embed(
+                    title=f"🎭 Style Profile — {user.display_name}",
+                    description=profile,
+                    color=0x9B59B6,
+                )
+                embed.set_footer(text=f"Analyzed {msg_count} messages")
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("Failed to build profile. Try again later.")
+        return
+
+    if not prompt:
+        await ctx.send("Usage: `!mimic @user what do you think about...`\nOr: `!mimic @user profile` to view/rebuild their style profile.")
+        return
+
+    if user.bot:
+        await ctx.send("I can't mimic other bots! 🤖")
+        return
+
+    async with ctx.typing():
+        # Check message count
+        msg_count = await mimic_svc.get_message_count(user.id, ctx.guild.id)
+        if msg_count < 10:
+            await ctx.send(
+                f"⚠️ {user.display_name} doesn't have enough messages yet "
+                f"({msg_count}/10 minimum). Keep chatting and try again later!"
+            )
+            return
+
+        response = await mimic_svc.mimic_user(user.id, ctx.guild.id, prompt)
+
+        if not response:
+            await ctx.send("Couldn't generate a response. The user might not have enough message history.")
+            return
+
+        # Send as a webhook-style message with the user's avatar (if possible)
+        # or as a styled embed
+        embed = discord.Embed(
+            description=response,
+            color=user.color if user.color != discord.Color.default() else 0x95A5A6,
+        )
+        embed.set_author(
+            name=f"{user.display_name} (mimicked)",
+            icon_url=user.display_avatar.url,
+        )
+        embed.set_footer(text=f"Responding to: {prompt[:80]}")
         await ctx.send(embed=embed)
 
 @bot.event
