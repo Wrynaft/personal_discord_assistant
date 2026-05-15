@@ -24,7 +24,7 @@ class DanbooruService:
         if self.session and not self.session.closed:
             await self.session.close()
 
-    async def get_top_posts(self, tags="", limit=5, date=None):
+    async def get_top_posts(self, tags="", limit=5, date=None, rating=None):
         """
         Fetch top-rated posts from Danbooru.
 
@@ -42,8 +42,10 @@ class DanbooruService:
 
         # Build tag query — add date and score sort
         tag_query = f"date:{date} order:score"
+        if rating:
+            tag_query = f"rating:{rating} {tag_query}"
         if tags:
-            # Free tier: 2 tag limit. date: and order: are meta-tags and don't count.
+            # Free tier: 2 tag limit. date:, order:, and rating: are meta-tags and don't count.
             tag_query = f"{tags} {tag_query}"
 
         params = {
@@ -151,14 +153,14 @@ class DanbooruService:
 
         return " ".join(resolved), corrections
 
-    async def get_random_top_post(self, tags=""):
+    async def get_random_top_post(self, tags="", rating=None):
         """Fetch a single random post from today's top 20."""
         import random
-        posts = await self.get_top_posts(tags=tags, limit=20)
+        posts = await self.get_top_posts(tags=tags, limit=20, rating=rating)
         if not posts:
             # Fallback: try yesterday's posts
             yesterday = (datetime.now(MYT) - timedelta(days=1)).strftime("%Y-%m-%d")
-            posts = await self.get_top_posts(tags=tags, limit=20, date=yesterday)
+            posts = await self.get_top_posts(tags=tags, limit=20, date=yesterday, rating=rating)
         return random.choice(posts) if posts else None
 
     @staticmethod

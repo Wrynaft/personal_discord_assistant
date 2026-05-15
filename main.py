@@ -350,9 +350,10 @@ async def post_danbooru_digest(destination):
         await destination.send("No Danbooru posts found for today. Try again later!")
         return
 
-    embed = discord.Embed(
+    header = discord.Embed(
         title="\U0001f3a8 Today's Top Danbooru Art",
         color=0xE91E63,  # Pink
+        url="https://danbooru.donmai.us",
     )
 
     for i, post in enumerate(posts, 1):
@@ -364,19 +365,25 @@ async def post_danbooru_digest(destination):
             info_parts.append(post['copyright'].split(' ')[0])  # First copyright
         info = " \u2022 ".join(info_parts) if info_parts else "Original"
 
-        embed.add_field(
+        header.add_field(
             name=f"{i}. {info} (Score: {post['score']})",
             value=f"[View Post]({post['page_url']}) \u2022 Artist: {post['artist'].split(' ')[0]} \u2022 {danbooru.rating_emoji(post['rating'])}",
             inline=False,
         )
 
-    # Set the first post's image as the embed thumbnail
-    if posts:
-        embed.set_image(url=posts[0]['file_url'])
+    # First image goes on the header embed itself
+    header.set_image(url=posts[0]['file_url'])
+    header.set_footer(text="Powered by Danbooru API")
+    header.timestamp = datetime.now(MYT)
 
-    embed.set_footer(text="Powered by Danbooru API")
-    embed.timestamp = datetime.now(MYT)
-    await destination.send(embed=embed)
+    # Additional image embeds share the same url so Discord renders them as a gallery
+    embeds = [header]
+    for post in posts[1:]:
+        img_embed = discord.Embed(url="https://danbooru.donmai.us", color=0xE91E63)
+        img_embed.set_image(url=post['file_url'])
+        embeds.append(img_embed)
+
+    await destination.send(embeds=embeds)
 
 
 @bot.hybrid_command(name="danbooru", description="Fetch a top Danbooru post with optional tag search")
@@ -384,6 +391,14 @@ async def danbooru_cmd(ctx, *, tags: str = ""):
     """Fetches a top Danbooru post. Usage: !danbooru [tags]"""
     async with ctx.typing():
         correction_msg = ""
+
+        # Check for nsfw flag
+        tag_list = tags.strip().split()
+        rating = None
+        if "nsfw" in tag_list:
+            rating = "explicit"
+            tag_list.remove("nsfw")
+            tags = " ".join(tag_list)
 
         if tags:
             # Fuzzy-match tags via Danbooru autocomplete
@@ -394,9 +409,9 @@ async def danbooru_cmd(ctx, *, tags: str = ""):
                 fixes = ", ".join(f"**{orig}** → **{fixed}**" for orig, fixed in corrections)
                 correction_msg = f"🔍 Auto-corrected: {fixes}\n"
 
-            post = await danbooru.get_random_top_post(tags=tags)
+            post = await danbooru.get_random_top_post(tags=tags, rating=rating)
         else:
-            post = await danbooru.get_random_top_post()
+            post = await danbooru.get_random_top_post(rating=rating)
 
         if not post:
             await ctx.send("No posts found. Try different tags or try again later.")
