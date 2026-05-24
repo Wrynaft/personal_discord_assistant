@@ -1902,6 +1902,55 @@ async def balance(ctx):
     await ctx.send(embed=embed)
 
 
+@bot.hybrid_command(description="List all casino games and commands")
+async def casino(ctx):
+    """Show available casino commands and games."""
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+
+    embed = discord.Embed(
+        title="\U0001f3b0 Casino Commands",
+        description=(
+            "Shared bank, daily quota, escalating debt. "
+            "Hit quota by midnight MYT or the whole run resets."
+        ),
+        color=0xF1C40F,
+    )
+    embed.add_field(
+        name="\U0001f4ca Status",
+        value=(
+            "`/balance` — Bank, debt, day-start cap, time until settle\n"
+            "`/leaderboard` — Top players for the current run"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="\U0001f3ae Games",
+        value=(
+            "🎰 `/slots` — 3-reel slots, 3-of-a-kind only (50% bet cap)\n"
+            "🎲 `/dice` — Craps: 7/11 instant win, point phase with 3-roll cap\n"
+            "🎡 `/wheel` — Wheel of fortune, 6 outcomes incl. 10x jackpot\n"
+            "🐎 `/horses` — 4 horses with weighted odds, pick then bet\n"
+            "🃏 `/blackjack` — Standard 21 vs dealer (hits to 17)"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="\U0001f4b0 Bet Sizes",
+        value=(
+            "Each game offers `¼`, `½`, `MAX` buttons. "
+            "Max is locked to the **bank-at-start-of-day**, not your current bank — "
+            "so one bad call can't bankrupt everyone."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text=f"Seed: ${config.GAMBLING_SEED_BANK:,} • Day 1 debt: ${config.GAMBLING_BASE_DEBT:,} • Quota grows {config.GAMBLING_DEBT_MULTIPLIER}x daily")
+    await ctx.send(embed=embed)
+
+
 @bot.hybrid_command(description="Show the casino leaderboard for the current run")
 async def leaderboard(ctx):
     """Top players by net profit/loss since the current run started."""
