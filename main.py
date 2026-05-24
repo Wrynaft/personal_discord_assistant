@@ -314,6 +314,11 @@ async def on_ready():
             daily_danbooru.start()
             print(f'Daily Danbooru scheduled for 9:45 PM MYT in channel {config.DANBOORU_CHANNEL_ID}')
 
+    if config.CASINO_CHANNEL_ID:
+        if not daily_casino_settle.is_running():
+            daily_casino_settle.start()
+            print(f'Daily casino settle scheduled for midnight MYT in channel {config.CASINO_CHANNEL_ID}')
+
     # Sync slash commands with Discord
     try:
         synced = await bot.tree.sync()
@@ -356,6 +361,94 @@ async def daily_danbooru():
         print(f"Error: Could not find Danbooru channel {config.DANBOORU_CHANNEL_ID}")
         return
     await post_danbooru_digest(channel)
+
+
+@tasks.loop(time=time(hour=0, minute=0, tzinfo=MYT))
+async def daily_casino_settle():
+    """Run the casino quota check at midnight MYT and post a summary."""
+    if not config.CASINO_CHANNEL_ID:
+        return
+    channel = bot.get_channel(config.CASINO_CHANNEL_ID)
+    if not channel:
+        print(f"Error: casino channel {config.CASINO_CHANNEL_ID} not found")
+        return
+
+    guild_id = channel.guild.id
+    result = await gambling.settle_day(guild_id)
+    if not result:
+        return  # no bank row yet — nobody's played
+
+    now = datetime.now(MYT)
+    if result["outcome"] == "survived":
+        day_start = now - timedelta(days=1)
+        stats = await gambling.get_player_stats(guild_id, day_start, now)
+        await _post_settle_survived(channel, result, stats)
+    else:
+        run_stats = await gambling.get_player_stats(
+            guild_id, result["streak_started_at"], now,
+        )
+        await _post_settle_reset(channel, result, run_stats)
+
+
+def _format_player_stats(stats):
+    """Render a leaderboard line list from get_player_stats output."""
+    lines = []
+    for i, s in enumerate(stats, 1):
+        net = s["net_total"] or 0
+        sign = "+" if net >= 0 else "−"
+        wins = s["wins"] or 0
+        losses = s["losses"] or 0
+        lines.append(
+            f"`{i}.` **{s['user_name']}**: {sign}${abs(net):,}  "
+            f"({s['bet_count']} bets, {wins}W / {losses}L)"
+        )
+    return "\n".join(lines)
+
+
+async def _post_settle_survived(channel, result, stats):
+    embed = discord.Embed(
+        title=f"\U0001f319 Day {result['old_day']} Settled — Survived",
+        description=(
+            f"Bank: **${result['bank_before']:,}** → paid **${result['debt_paid']:,}** debt → "
+            f"**${result['carryover']:,}** carries into Day {result['new_day']}\n\n"
+            f"Day {result['new_day']} quota: **${result['next_debt']:,}**"
+        ),
+        color=0x2ECC71,
+    )
+    if stats:
+        embed.add_field(name="📊 Today's Top 5", value=_format_player_stats(stats[:5]), inline=False)
+    else:
+        embed.add_field(name="📊 Today", value="_No bets placed_", inline=False)
+    embed.timestamp = datetime.now(MYT)
+    await channel.send(embed=embed)
+
+
+async def _post_settle_reset(channel, result, run_stats):
+    started = result["streak_started_at"]
+    duration_days = result["old_day"]
+    embed = discord.Embed(
+        title=f"\U0001f480 RUN ENDED — Day {result['old_day']} Bust",
+        description=(
+            f"Bank was **${result['bank_before']:,}**, needed **${result['debt_owed']:,}**. "
+            f"Short by **${result['missing']:,}**.\n\n"
+            f"Run lasted **{duration_days}** day{'s' if duration_days != 1 else ''} since "
+            f"{started.strftime('%Y-%m-%d')}.\n\n"
+            f"🔄 Fresh run starts: **${result['seed']:,}** seed, "
+            f"Day 1 quota **${config.GAMBLING_BASE_DEBT:,}**"
+        ),
+        color=0xE74C3C,
+    )
+    if run_stats:
+        embed.add_field(
+            name="🏆 Final Run Leaderboard",
+            value=_format_player_stats(run_stats[:10]),
+            inline=False,
+        )
+    else:
+        embed.add_field(name="📊 Stats", value="_No bets were placed this run_", inline=False)
+    embed.timestamp = datetime.now(MYT)
+    await channel.send(embed=embed)
+
 
 @bot.hybrid_command(description="Check if the bot is alive")
 async def ping(ctx):
@@ -1806,6 +1899,42 @@ async def balance(ctx):
     embed.set_footer(text=f"Run started {started.strftime('%Y-%m-%d')} • Midnight MYT settle")
     embed.timestamp = datetime.now(MYT)
 
+    await ctx.send(embed=embed)
+
+
+@bot.hybrid_command(description="Show the casino leaderboard for the current run")
+async def leaderboard(ctx):
+    """Top players by net profit/loss since the current run started."""
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+
+    state = await gambling.get_or_create_bank(ctx.guild.id)
+    if not state:
+        await ctx.send("Casino DB not available.")
+        return
+
+    streak_start = state["streak_started_at"]
+    stats = await gambling.get_player_stats(ctx.guild.id, streak_start)
+
+    if not stats:
+        await ctx.send("No bets placed yet this run. Run `/slots`, `/dice`, etc. to start.")
+        return
+
+    embed = discord.Embed(
+        title=f"\U0001f3c6 Casino Leaderboard — Day {state['day_number']}",
+        description=_format_player_stats(stats[:10]),
+        color=0xF1C40F,
+    )
+    embed.set_footer(
+        text=(
+            f"Run started {streak_start.strftime('%Y-%m-%d')} • "
+            f"{len(stats)} players • Sorted by net P/L"
+        )
+    )
+    embed.timestamp = datetime.now(MYT)
     await ctx.send(embed=embed)
 
 

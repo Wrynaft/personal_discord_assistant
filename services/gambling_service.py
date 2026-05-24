@@ -84,9 +84,11 @@ class GamblingService:
                         "outcome": "survived",
                         "old_day": day,
                         "new_day": new_day,
+                        "bank_before": bank,
                         "debt_paid": debt,
                         "carryover": new_bank,
                         "next_debt": new_debt,
+                        "streak_started_at": row["streak_started_at"],
                     }
 
                 await conn.execute(
@@ -105,8 +107,11 @@ class GamblingService:
                 return {
                     "outcome": "reset",
                     "old_day": day,
+                    "bank_before": bank,
+                    "debt_owed": debt,
                     "missing": debt - bank,
                     "seed": config.GAMBLING_SEED_BANK,
+                    "streak_started_at": row["streak_started_at"],
                 }
 
     async def apply_bet(self, guild_id, user_id, user_name, game, bet, payout, metadata=None):
@@ -153,6 +158,44 @@ class GamblingService:
                     json.dumps(metadata) if metadata else None,
                 )
                 return {"new_bank": new_bank, "net": net}
+
+    async def get_player_stats(self, guild_id, start_time, end_time=None):
+        """Aggregate per-player stats for a time window. Returns list sorted by net DESC.
+
+        Each row: user_name, net_total, bet_count, total_wagered, wins, losses
+        end_time=None means "up to now".
+        """
+        if not self.pool:
+            return []
+        if end_time is None:
+            query = """
+                SELECT user_name,
+                       sum(net)                       AS net_total,
+                       count(*)                       AS bet_count,
+                       sum(bet)                       AS total_wagered,
+                       count(*) FILTER (WHERE net > 0) AS wins,
+                       count(*) FILTER (WHERE net < 0) AS losses
+                FROM gambling_transactions
+                WHERE guild_id = $1 AND created_at >= $2
+                GROUP BY user_name
+                ORDER BY net_total DESC
+            """
+            rows = await self.pool.fetch(query, guild_id, start_time)
+        else:
+            query = """
+                SELECT user_name,
+                       sum(net)                       AS net_total,
+                       count(*)                       AS bet_count,
+                       sum(bet)                       AS total_wagered,
+                       count(*) FILTER (WHERE net > 0) AS wins,
+                       count(*) FILTER (WHERE net < 0) AS losses
+                FROM gambling_transactions
+                WHERE guild_id = $1 AND created_at >= $2 AND created_at < $3
+                GROUP BY user_name
+                ORDER BY net_total DESC
+            """
+            rows = await self.pool.fetch(query, guild_id, start_time, end_time)
+        return [dict(r) for r in rows]
 
     def compute_bet_options(self, day_start_bank, current_bank, game=None):
         """Compute the three bet button amounts and whether each is affordable.
