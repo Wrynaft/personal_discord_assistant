@@ -13,6 +13,7 @@ from services.danbooru_service import DanbooruService
 from services.mimic_service import MimicService
 from services.gambling_service import GamblingService
 from services import search_service
+from services import casino_games
 
 # Malaysian Time = UTC+8
 MYT = timezone(timedelta(hours=8))
@@ -790,6 +791,139 @@ async def mimic(ctx, user: discord.Member, *, prompt: str = ""):
         )
         embed.set_footer(text=f"Responding to: {prompt[:80]}")
         await ctx.send(embed=embed)
+
+class SlotBetView(discord.ui.View):
+    """Bet-size picker for /slots. Only the caller can click."""
+
+    def __init__(self, ctx, day_start_bank, current_bank):
+        super().__init__(timeout=60)
+        self.ctx = ctx
+        self.day_start_bank = day_start_bank
+        options = gambling.compute_bet_options(day_start_bank, current_bank)
+
+        self.quarter.label = f"¼  ${options['quarter']['amount']:,}"
+        self.quarter.disabled = not options['quarter']['enabled']
+        self.half.label = f"½  ${options['half']['amount']:,}"
+        self.half.disabled = not options['half']['enabled']
+        self.max_bet.label = f"MAX  ${options['max']['amount']:,}"
+        self.max_bet.disabled = not options['max']['enabled']
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "That bet button isn't yours — run `/slots` to play your own spin.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(style=discord.ButtonStyle.secondary)
+    async def quarter(self, interaction, button):
+        await self._spin(interaction, self.day_start_bank // 4)
+
+    @discord.ui.button(style=discord.ButtonStyle.primary)
+    async def half(self, interaction, button):
+        await self._spin(interaction, self.day_start_bank // 2)
+
+    @discord.ui.button(style=discord.ButtonStyle.danger)
+    async def max_bet(self, interaction, button):
+        await self._spin(interaction, self.day_start_bank)
+
+    async def _spin(self, interaction, bet):
+        # Lock all buttons before we touch state
+        for child in self.children:
+            child.disabled = True
+
+        result = casino_games.spin_slots()
+        payout = bet * result["multiplier"]
+
+        outcome = await gambling.apply_bet(
+            guild_id=self.ctx.guild.id,
+            user_id=self.ctx.author.id,
+            user_name=self.ctx.author.display_name,
+            game="slots",
+            bet=bet,
+            payout=payout,
+            metadata={
+                "reels": [r["name"] for r in result["reels"]],
+                "multiplier": result["multiplier"],
+            },
+        )
+
+        if outcome is None or outcome.get("error"):
+            err = (outcome or {}).get("error", "DB unavailable")
+            embed = discord.Embed(
+                title="\U0001f3b0 Slots — Bet failed",
+                description=f"Couldn't place bet: `{err}`. Bank may have shifted since you opened this view.",
+                color=0xE74C3C,
+            )
+            await interaction.response.edit_message(embed=embed, view=self)
+            return
+
+        net = outcome["net"]
+        new_bank = outcome["new_bank"]
+        reels_line = casino_games.format_reels(result["reels"])
+
+        if result["win"]:
+            color = 0x2ECC71
+            title = f"\U0001f3b0 {self.ctx.author.display_name} hit {result['match_name']}s!"
+            desc = (
+                f"## {reels_line}\n"
+                f"**+${payout - bet:,}** ({result['multiplier']}x payout on ${bet:,})\n"
+                f"Bank: **${new_bank:,}**"
+            )
+        else:
+            color = 0xE74C3C
+            title = f"\U0001f3b0 {self.ctx.author.display_name} spun and lost"
+            desc = (
+                f"## {reels_line}\n"
+                f"No match. **−${bet:,}**\n"
+                f"Bank: **${new_bank:,}**"
+            )
+
+        embed = discord.Embed(title=title, description=desc, color=color)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+@bot.hybrid_command(description="Spin the slots — pick ¼, ½, or MAX of the day-start bank")
+async def slots(ctx):
+    """Open a slot machine bet picker."""
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+
+    state = await gambling.get_or_create_bank(ctx.guild.id)
+    if not state:
+        await ctx.send("Casino DB not available. Try again later.")
+        return
+
+    bank = state["bank"]
+    day_start = state["day_start_bank"]
+
+    if bank <= 0:
+        await ctx.send(
+            "\U0001f4b8 Bank is empty. Wait for midnight settle (bust resets to seed)."
+        )
+        return
+
+    embed = discord.Embed(
+        title="\U0001f3b0 Slots",
+        description=(
+            f"Bank: **${bank:,}**  •  Day-start cap: **${day_start:,}**\n\n"
+            "Pick your bet:"
+        ),
+        color=0xF1C40F,
+    )
+    embed.set_footer(text="3-of-a-kind only • 🍒10x  🍋16x  🍊25x  🍇50x  🔔150x  7️⃣400x")
+    view = SlotBetView(ctx, day_start, bank)
+    await ctx.send(embed=embed, view=view)
+
 
 @bot.hybrid_command(description="Show the shared casino bank, debt, and today's bet sizes")
 async def balance(ctx):
