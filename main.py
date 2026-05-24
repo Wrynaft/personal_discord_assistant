@@ -798,8 +798,13 @@ class SlotBetView(discord.ui.View):
     def __init__(self, ctx, day_start_bank, current_bank):
         super().__init__(timeout=60)
         self.ctx = ctx
-        self.day_start_bank = day_start_bank
-        options = gambling.compute_bet_options(day_start_bank, current_bank)
+        options = gambling.compute_bet_options(day_start_bank, current_bank, game="slots")
+        # Store the actual capped amounts so _spin uses the per-game cap, not raw day_start.
+        self.amounts = {
+            "quarter": options["quarter"]["amount"],
+            "half":    options["half"]["amount"],
+            "max":     options["max"]["amount"],
+        }
 
         self.quarter.label = f"¼  ${options['quarter']['amount']:,}"
         self.quarter.disabled = not options['quarter']['enabled']
@@ -823,15 +828,15 @@ class SlotBetView(discord.ui.View):
 
     @discord.ui.button(style=discord.ButtonStyle.secondary)
     async def quarter(self, interaction, button):
-        await self._spin(interaction, self.day_start_bank // 4)
+        await self._spin(interaction, self.amounts["quarter"])
 
     @discord.ui.button(style=discord.ButtonStyle.primary)
     async def half(self, interaction, button):
-        await self._spin(interaction, self.day_start_bank // 2)
+        await self._spin(interaction, self.amounts["half"])
 
     @discord.ui.button(style=discord.ButtonStyle.danger)
     async def max_bet(self, interaction, button):
-        await self._spin(interaction, self.day_start_bank)
+        await self._spin(interaction, self.amounts["max"])
 
     async def _spin(self, interaction, bet):
         # Lock all buttons before we touch state
@@ -889,6 +894,241 @@ class SlotBetView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 
+class _DiceRollButton(discord.ui.Button):
+    """Standalone Roll button used during the dice point phase."""
+
+    def __init__(self, rolls_remaining):
+        super().__init__(
+            label=f"🎲 Roll  ({rolls_remaining} left)",
+            style=discord.ButtonStyle.primary,
+        )
+
+    async def callback(self, interaction):
+        view: DiceView = self.view
+        await view._roll_point(interaction)
+
+
+class DiceView(discord.ui.View):
+    """Stateful craps view: bet picker → come-out roll → optional point phase."""
+
+    def __init__(self, ctx, day_start_bank, current_bank):
+        super().__init__(timeout=120)
+        self.ctx = ctx
+        options = gambling.compute_bet_options(day_start_bank, current_bank, game="dice")
+        self.amounts = {
+            "quarter": options["quarter"]["amount"],
+            "half":    options["half"]["amount"],
+            "max":     options["max"]["amount"],
+        }
+        self.bet = 0
+        self.point = None
+        self.rolls = []           # list of (d1, d2, total) for point phase
+        self.comeout = None       # (d1, d2, total) for record
+
+        self.quarter.label = f"¼  ${options['quarter']['amount']:,}"
+        self.quarter.disabled = not options['quarter']['enabled']
+        self.half.label = f"½  ${options['half']['amount']:,}"
+        self.half.disabled = not options['half']['enabled']
+        self.max_bet.label = f"MAX  ${options['max']['amount']:,}"
+        self.max_bet.disabled = not options['max']['enabled']
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "That dice game isn't yours — run `/dice` to start your own.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(style=discord.ButtonStyle.secondary)
+    async def quarter(self, interaction, button):
+        await self._comeout(interaction, self.amounts["quarter"])
+
+    @discord.ui.button(style=discord.ButtonStyle.primary)
+    async def half(self, interaction, button):
+        await self._comeout(interaction, self.amounts["half"])
+
+    @discord.ui.button(style=discord.ButtonStyle.danger)
+    async def max_bet(self, interaction, button):
+        await self._comeout(interaction, self.amounts["max"])
+
+    async def _comeout(self, interaction, bet):
+        self.bet = bet
+        roll = casino_games.dice_comeout()
+        self.comeout = (roll["d1"], roll["d2"], roll["total"])
+
+        if roll["outcome"] == "win":
+            await self._settle(interaction, payout=int(round(bet * casino_games.DICE_WIN_PAYOUT)),
+                               reason="instant_win", final_roll=roll)
+            return
+        if roll["outcome"] == "lose":
+            await self._settle(interaction, payout=0, reason="instant_lose", final_roll=roll)
+            return
+
+        # Point set — swap to roll button
+        self.point = roll["point"]
+        self.clear_items()
+        self.add_item(_DiceRollButton(casino_games.DICE_POINT_MAX_ROLLS))
+
+        embed = discord.Embed(
+            title=f"\U0001f3b2 Dice — ${bet:,} bet • {self.ctx.author.display_name}",
+            description=(
+                f"Come-out: {casino_games.format_dice(roll['d1'], roll['d2'])}\n"
+                f"**Point is {self.point}.** Roll it again to win — but roll a 7 and you bust.\n"
+                f"You have **{casino_games.DICE_POINT_MAX_ROLLS}** rolls."
+            ),
+            color=0xF39C12,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def _roll_point(self, interaction):
+        roll = casino_games.dice_point_roll(self.point)
+        self.rolls.append((roll["d1"], roll["d2"], roll["total"]))
+
+        if roll["outcome"] == "win":
+            payout = int(round(self.bet * casino_games.DICE_WIN_PAYOUT))
+            await self._settle(interaction, payout=payout, reason="point_win", final_roll=roll)
+            return
+        if roll["outcome"] == "lose":
+            await self._settle(interaction, payout=0, reason="seven_out", final_roll=roll)
+            return
+
+        # Continue. If we just exhausted our rolls → refund.
+        if len(self.rolls) >= casino_games.DICE_POINT_MAX_ROLLS:
+            await self._settle(interaction, payout=self.bet, reason="refund", final_roll=roll)
+            return
+
+        # Still rolls left — refresh the roll button with the new counter
+        rolls_left = casino_games.DICE_POINT_MAX_ROLLS - len(self.rolls)
+        self.clear_items()
+        self.add_item(_DiceRollButton(rolls_left))
+
+        history = "\n".join(
+            f"Roll {i+1}: {casino_games.format_dice(d1, d2)}"
+            for i, (d1, d2, _) in enumerate(self.rolls)
+        )
+        embed = discord.Embed(
+            title=f"\U0001f3b2 Dice — ${self.bet:,} bet • {self.ctx.author.display_name}",
+            description=(
+                f"Come-out: {casino_games.format_dice(*self.comeout[:2])}\n"
+                f"**Point: {self.point}**\n\n{history}\n\n"
+                f"Neither point nor 7 yet. **{rolls_left}** rolls left."
+            ),
+            color=0xF39C12,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def _settle(self, interaction, payout, reason, final_roll):
+        # Lock all buttons
+        for child in self.children:
+            child.disabled = True
+
+        outcome = await gambling.apply_bet(
+            guild_id=self.ctx.guild.id,
+            user_id=self.ctx.author.id,
+            user_name=self.ctx.author.display_name,
+            game="dice",
+            bet=self.bet,
+            payout=payout,
+            metadata={
+                "comeout": list(self.comeout),
+                "point": self.point,
+                "point_rolls": [list(r) for r in self.rolls],
+                "result": reason,
+            },
+        )
+
+        if outcome is None or outcome.get("error"):
+            err = (outcome or {}).get("error", "DB unavailable")
+            await interaction.response.edit_message(
+                embed=discord.Embed(
+                    title="\U0001f3b2 Dice — Bet failed",
+                    description=f"Couldn't settle bet: `{err}`.",
+                    color=0xE74C3C,
+                ),
+                view=self,
+            )
+            return
+
+        net = outcome["net"]
+        new_bank = outcome["new_bank"]
+
+        # Build the history block
+        lines = [f"Come-out: {casino_games.format_dice(*self.comeout[:2])}"]
+        for i, (d1, d2, _) in enumerate(self.rolls):
+            lines.append(f"Roll {i+1}: {casino_games.format_dice(d1, d2)}")
+        history = "\n".join(lines)
+
+        labels = {
+            "instant_win": ("🎯 LUCKY 7/11 — INSTANT WIN", 0x2ECC71),
+            "instant_lose": ("💀 CRAPS — INSTANT LOSE", 0xE74C3C),
+            "point_win":   (f"✅ HIT THE POINT ({self.point})", 0x2ECC71),
+            "seven_out":   ("💀 SEVEN OUT", 0xE74C3C),
+            "refund":      ("⏸️ NO HIT IN 3 ROLLS — REFUND", 0x95A5A6),
+        }
+        title_tag, color = labels[reason]
+
+        if net > 0:
+            settle_line = f"**+${net:,}** ({casino_games.DICE_WIN_PAYOUT}x payout on ${self.bet:,})"
+        elif net < 0:
+            settle_line = f"**−${abs(net):,}**"
+        else:
+            settle_line = f"**${self.bet:,} refunded**"
+
+        embed = discord.Embed(
+            title=f"\U0001f3b2 Dice — ${self.bet:,} bet • {self.ctx.author.display_name}",
+            description=(
+                f"{history}\n\n"
+                f"## {title_tag}\n{settle_line}\nBank: **${new_bank:,}**"
+            ),
+            color=color,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+@bot.hybrid_command(description="Play craps — roll 2 dice, 7/11 wins, 2/3/12 loses, else chase your point")
+async def dice(ctx):
+    """Open a craps bet picker."""
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+
+    state = await gambling.get_or_create_bank(ctx.guild.id)
+    if not state:
+        await ctx.send("Casino DB not available. Try again later.")
+        return
+
+    bank = state["bank"]
+    day_start = state["day_start_bank"]
+    if bank <= 0:
+        await ctx.send("\U0001f4b8 Bank is empty. Wait for midnight settle.")
+        return
+
+    embed = discord.Embed(
+        title="\U0001f3b2 Craps Dice",
+        description=(
+            f"Bank: **${bank:,}**  •  Day-start cap: **${day_start:,}**\n\n"
+            "**Rules:**\n"
+            "• Come-out roll: **7 or 11** → instant win, **2/3/12** → instant lose\n"
+            f"• Otherwise that number is your **point** — roll it again within "
+            f"**{casino_games.DICE_POINT_MAX_ROLLS}** rolls to win\n"
+            "• Rolling a **7** loses. Hitting neither in 3 rolls = refund\n"
+            f"• Wins pay **{casino_games.DICE_WIN_PAYOUT}x**\n\n"
+            "Pick your bet:"
+        ),
+        color=0xF39C12,
+    )
+    view = DiceView(ctx, day_start, bank)
+    await ctx.send(embed=embed, view=view)
+
+
 @bot.hybrid_command(description="Spin the slots — pick ¼, ½, or MAX of the day-start bank")
 async def slots(ctx):
     """Open a slot machine bet picker."""
@@ -912,16 +1152,594 @@ async def slots(ctx):
         )
         return
 
+    slot_cap_ratio = config.GAMBLING_GAME_CAPS.get("slots", 1.0)
+    slot_cap = int(day_start * slot_cap_ratio)
     embed = discord.Embed(
         title="\U0001f3b0 Slots",
         description=(
-            f"Bank: **${bank:,}**  •  Day-start cap: **${day_start:,}**\n\n"
+            f"Bank: **${bank:,}**  •  Slot cap: **${slot_cap:,}** "
+            f"({int(slot_cap_ratio * 100)}% of day-start)\n\n"
             "Pick your bet:"
         ),
         color=0xF1C40F,
     )
     embed.set_footer(text="3-of-a-kind only • 🍒10x  🍋16x  🍊25x  🍇50x  🔔150x  7️⃣400x")
     view = SlotBetView(ctx, day_start, bank)
+    await ctx.send(embed=embed, view=view)
+
+
+# ── Wheel ────────────────────────────────────────────────────────────
+
+class WheelView(discord.ui.View):
+    """Bet picker for /wheel — single weighted spin."""
+
+    def __init__(self, ctx, day_start_bank, current_bank):
+        super().__init__(timeout=60)
+        self.ctx = ctx
+        options = gambling.compute_bet_options(day_start_bank, current_bank, game="wheel")
+        self.amounts = {
+            "quarter": options["quarter"]["amount"],
+            "half":    options["half"]["amount"],
+            "max":     options["max"]["amount"],
+        }
+
+        self.quarter.label = f"¼  ${options['quarter']['amount']:,}"
+        self.quarter.disabled = not options['quarter']['enabled']
+        self.half.label = f"½  ${options['half']['amount']:,}"
+        self.half.disabled = not options['half']['enabled']
+        self.max_bet.label = f"MAX  ${options['max']['amount']:,}"
+        self.max_bet.disabled = not options['max']['enabled']
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "That spin isn't yours — run `/wheel` to play your own.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(style=discord.ButtonStyle.secondary)
+    async def quarter(self, interaction, button):
+        await self._spin(interaction, self.amounts["quarter"])
+
+    @discord.ui.button(style=discord.ButtonStyle.primary)
+    async def half(self, interaction, button):
+        await self._spin(interaction, self.amounts["half"])
+
+    @discord.ui.button(style=discord.ButtonStyle.danger)
+    async def max_bet(self, interaction, button):
+        await self._spin(interaction, self.amounts["max"])
+
+    async def _spin(self, interaction, bet):
+        for child in self.children:
+            child.disabled = True
+        result = casino_games.spin_wheel()
+        payout = int(round(bet * result["multiplier"]))
+
+        outcome = await gambling.apply_bet(
+            guild_id=self.ctx.guild.id,
+            user_id=self.ctx.author.id,
+            user_name=self.ctx.author.display_name,
+            game="wheel",
+            bet=bet,
+            payout=payout,
+            metadata={"outcome": result["label"], "multiplier": result["multiplier"]},
+        )
+        if outcome is None or outcome.get("error"):
+            err = (outcome or {}).get("error", "DB unavailable")
+            await interaction.response.edit_message(
+                embed=discord.Embed(
+                    title="🎡 Wheel — Bet failed",
+                    description=f"Couldn't place bet: `{err}`.",
+                    color=0xE74C3C,
+                ),
+                view=self,
+            )
+            return
+
+        net = outcome["net"]
+        new_bank = outcome["new_bank"]
+
+        if result["multiplier"] >= 5:
+            color = 0xF1C40F  # gold
+        elif result["multiplier"] >= 2:
+            color = 0x2ECC71
+        elif result["multiplier"] == 1:
+            color = 0x95A5A6  # grey for refund
+        else:
+            color = 0xE74C3C
+
+        if net > 0:
+            settle_line = f"**+${net:,}** ({result['multiplier']}x payout on ${bet:,})"
+        elif net == 0:
+            settle_line = f"**${bet:,} refunded**"
+        else:
+            settle_line = f"**−${abs(net):,}**"
+
+        embed = discord.Embed(
+            title=f"🎡 Wheel — ${bet:,} bet • {self.ctx.author.display_name}",
+            description=(
+                f"## {result['emoji']}  {result['label']}\n"
+                f"{settle_line}\nBank: **${new_bank:,}**"
+            ),
+            color=color,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+@bot.hybrid_command(description="Spin the wheel of fortune — 6 outcomes from lose to 10x jackpot")
+async def wheel(ctx):
+    """Open a wheel-of-fortune bet picker."""
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+
+    state = await gambling.get_or_create_bank(ctx.guild.id)
+    if not state:
+        await ctx.send("Casino DB not available. Try again later.")
+        return
+
+    bank = state["bank"]
+    day_start = state["day_start_bank"]
+    if bank <= 0:
+        await ctx.send("\U0001f4b8 Bank is empty. Wait for midnight settle.")
+        return
+
+    outcomes_lines = []
+    for o in casino_games.WHEEL_OUTCOMES:
+        if o["multiplier"] > 1:
+            label = f"**{o['multiplier']}x**"
+        elif o["multiplier"] == 1:
+            label = "Refund"
+        else:
+            label = "Lose"
+        outcomes_lines.append(f"{o['emoji']}  {label}  ({o['weight']}%)")
+    outcomes_block = "\n".join(outcomes_lines)
+
+    embed = discord.Embed(
+        title="\U0001f3a1 Wheel of Fortune",
+        description=(
+            f"Bank: **${bank:,}**  •  Day-start cap: **${day_start:,}**\n\n"
+            f"**Outcomes:**\n{outcomes_block}\n\n"
+            "Pick your bet:"
+        ),
+        color=0xE91E63,
+    )
+    view = WheelView(ctx, day_start, bank)
+    await ctx.send(embed=embed, view=view)
+
+
+# ── Horse Race ───────────────────────────────────────────────────────
+
+class _HorsePickButton(discord.ui.Button):
+    def __init__(self, index, horse):
+        super().__init__(
+            label=f"{horse['emoji']} {horse['name']}  ({horse['payout']}x)",
+            style=discord.ButtonStyle.primary,
+        )
+        self.index = index
+
+    async def callback(self, interaction):
+        view: HorseRaceView = self.view
+        await view._pick_horse(interaction, self.index)
+
+
+class _HorseBetButton(discord.ui.Button):
+    def __init__(self, label, amount, enabled, style):
+        super().__init__(label=label, style=style, disabled=not enabled)
+        self.amount = amount
+
+    async def callback(self, interaction):
+        view: HorseRaceView = self.view
+        await view._place_bet(interaction, self.amount)
+
+
+class HorseRaceView(discord.ui.View):
+    """Two-stage view: pick horse → pick bet → race result."""
+
+    def __init__(self, ctx, day_start_bank, current_bank):
+        super().__init__(timeout=120)
+        self.ctx = ctx
+        self.day_start_bank = day_start_bank
+        self.current_bank = current_bank
+        self.chosen_horse_idx = None
+        self.bet_options = gambling.compute_bet_options(day_start_bank, current_bank, game="horses")
+
+        for i, horse in enumerate(casino_games.HORSES):
+            self.add_item(_HorsePickButton(i, horse))
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "That race isn't yours — run `/horses` to bet on your own.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+    async def _pick_horse(self, interaction, idx):
+        self.chosen_horse_idx = idx
+        horse = casino_games.HORSES[idx]
+
+        self.clear_items()
+        opts = self.bet_options
+        self.add_item(_HorseBetButton(
+            f"¼  ${opts['quarter']['amount']:,}",
+            opts['quarter']['amount'], opts['quarter']['enabled'],
+            discord.ButtonStyle.secondary,
+        ))
+        self.add_item(_HorseBetButton(
+            f"½  ${opts['half']['amount']:,}",
+            opts['half']['amount'], opts['half']['enabled'],
+            discord.ButtonStyle.primary,
+        ))
+        self.add_item(_HorseBetButton(
+            f"MAX  ${opts['max']['amount']:,}",
+            opts['max']['amount'], opts['max']['enabled'],
+            discord.ButtonStyle.danger,
+        ))
+
+        embed = discord.Embed(
+            title=f"\U0001f40e Horse Race — {self.ctx.author.display_name}",
+            description=(
+                f"You picked **{horse['emoji']} {horse['name']}** "
+                f"({horse['payout']}x payout, ~{horse['weight']}% win rate)\n\n"
+                "Pick your bet:"
+            ),
+            color=0x3498DB,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def _place_bet(self, interaction, bet):
+        for child in self.children:
+            child.disabled = True
+
+        winner_idx, winner = casino_games.run_race()
+        chosen = casino_games.HORSES[self.chosen_horse_idx]
+        win = (winner_idx == self.chosen_horse_idx)
+        payout = int(round(bet * chosen["payout"])) if win else 0
+
+        outcome = await gambling.apply_bet(
+            guild_id=self.ctx.guild.id,
+            user_id=self.ctx.author.id,
+            user_name=self.ctx.author.display_name,
+            game="horses",
+            bet=bet,
+            payout=payout,
+            metadata={
+                "chosen": chosen["name"],
+                "winner": winner["name"],
+                "win": win,
+            },
+        )
+        if outcome is None or outcome.get("error"):
+            err = (outcome or {}).get("error", "DB unavailable")
+            await interaction.response.edit_message(
+                embed=discord.Embed(
+                    title="🐎 Race — Bet failed",
+                    description=f"Couldn't place bet: `{err}`.",
+                    color=0xE74C3C,
+                ),
+                view=self,
+            )
+            return
+
+        net = outcome["net"]
+        new_bank = outcome["new_bank"]
+
+        lines = []
+        for i, h in enumerate(casino_games.HORSES):
+            tag = ""
+            if i == winner_idx:
+                tag += "  🏁 WINNER"
+            if i == self.chosen_horse_idx:
+                tag += "  ⬅️ your pick"
+            lines.append(f"{h['emoji']}  {h['name']}{tag}")
+
+        if win:
+            color = 0x2ECC71
+            settle_line = f"**+${net:,}** ({chosen['payout']}x on ${bet:,})"
+        else:
+            color = 0xE74C3C
+            settle_line = f"**−${bet:,}**"
+
+        embed = discord.Embed(
+            title=f"\U0001f40e Horse Race — ${bet:,} bet • {self.ctx.author.display_name}",
+            description=(
+                "\n".join(lines)
+                + f"\n\n{settle_line}\nBank: **${new_bank:,}**"
+            ),
+            color=color,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+@bot.hybrid_command(description="Bet on a horse race — 4 horses with weighted odds")
+async def horses(ctx):
+    """Open a horse race bet picker."""
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+
+    state = await gambling.get_or_create_bank(ctx.guild.id)
+    if not state:
+        await ctx.send("Casino DB not available. Try again later.")
+        return
+
+    bank = state["bank"]
+    day_start = state["day_start_bank"]
+    if bank <= 0:
+        await ctx.send("\U0001f4b8 Bank is empty. Wait for midnight settle.")
+        return
+
+    lines = []
+    for h in casino_games.HORSES:
+        lines.append(
+            f"{h['emoji']}  **{h['name']}** — {h['payout']}x payout, ~{h['weight']}% win rate"
+        )
+    horses_block = "\n".join(lines)
+
+    embed = discord.Embed(
+        title="\U0001f40e Horse Race",
+        description=(
+            f"Bank: **${bank:,}**  •  Day-start cap: **${day_start:,}**\n\n"
+            f"**Field:**\n{horses_block}\n\n"
+            "Pick your horse:"
+        ),
+        color=0x3498DB,
+    )
+    view = HorseRaceView(ctx, day_start, bank)
+    await ctx.send(embed=embed, view=view)
+
+
+# ── Blackjack ────────────────────────────────────────────────────────
+
+class _BlackjackHitButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Hit", style=discord.ButtonStyle.primary)
+
+    async def callback(self, interaction):
+        view: BlackjackView = self.view
+        await view._hit(interaction)
+
+
+class _BlackjackStandButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Stand", style=discord.ButtonStyle.secondary)
+
+    async def callback(self, interaction):
+        view: BlackjackView = self.view
+        await view._stand(interaction)
+
+
+class BlackjackView(discord.ui.View):
+    """Two-phase blackjack: bet picker → hit/stand → settle."""
+
+    def __init__(self, ctx, day_start_bank, current_bank):
+        super().__init__(timeout=120)
+        self.ctx = ctx
+        options = gambling.compute_bet_options(day_start_bank, current_bank, game="blackjack")
+        self.amounts = {
+            "quarter": options["quarter"]["amount"],
+            "half":    options["half"]["amount"],
+            "max":     options["max"]["amount"],
+        }
+        self.bet = 0
+        self.deck = None
+        self.player_hand = None
+        self.dealer_hand = None
+
+        self.quarter.label = f"¼  ${options['quarter']['amount']:,}"
+        self.quarter.disabled = not options['quarter']['enabled']
+        self.half.label = f"½  ${options['half']['amount']:,}"
+        self.half.disabled = not options['half']['enabled']
+        self.max_bet.label = f"MAX  ${options['max']['amount']:,}"
+        self.max_bet.disabled = not options['max']['enabled']
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "That hand isn't yours — run `/blackjack` to play your own.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(style=discord.ButtonStyle.secondary)
+    async def quarter(self, interaction, button):
+        await self._deal(interaction, self.amounts["quarter"])
+
+    @discord.ui.button(style=discord.ButtonStyle.primary)
+    async def half(self, interaction, button):
+        await self._deal(interaction, self.amounts["half"])
+
+    @discord.ui.button(style=discord.ButtonStyle.danger)
+    async def max_bet(self, interaction, button):
+        await self._deal(interaction, self.amounts["max"])
+
+    async def _deal(self, interaction, bet):
+        self.bet = bet
+        self.deck = casino_games.new_deck()
+        self.player_hand = [self.deck.pop(), self.deck.pop()]
+        self.dealer_hand = [self.deck.pop(), self.deck.pop()]
+
+        player_bj = casino_games.is_blackjack(self.player_hand)
+        dealer_bj = casino_games.is_blackjack(self.dealer_hand)
+
+        if player_bj and dealer_bj:
+            await self._settle(interaction, "push", payout=bet)
+            return
+        if player_bj:
+            payout = int(round(bet * casino_games.BLACKJACK_NATURAL_PAYOUT))
+            await self._settle(interaction, "player_blackjack", payout=payout)
+            return
+        if dealer_bj:
+            await self._settle(interaction, "dealer_blackjack", payout=0)
+            return
+
+        # Swap to hit/stand
+        self.clear_items()
+        self.add_item(_BlackjackHitButton())
+        self.add_item(_BlackjackStandButton())
+        await self._render_play(interaction)
+
+    async def _render_play(self, interaction):
+        p_val = casino_games.hand_value(self.player_hand)
+        embed = discord.Embed(
+            title=f"\U0001f0cf Blackjack — ${self.bet:,} • {self.ctx.author.display_name}",
+            description=(
+                f"**Dealer:** {casino_games.format_hand(self.dealer_hand, hide_first=True)}\n"
+                f"**You:** {casino_games.format_hand(self.player_hand)}  (**{p_val}**)\n\n"
+                "Hit or Stand?"
+            ),
+            color=0x2C3E50,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def _hit(self, interaction):
+        self.player_hand.append(self.deck.pop())
+        val = casino_games.hand_value(self.player_hand)
+        if val > 21:
+            await self._settle(interaction, "player_bust", payout=0)
+            return
+        if val == 21:
+            await self._stand(interaction)
+            return
+        await self._render_play(interaction)
+
+    async def _stand(self, interaction):
+        casino_games.play_dealer(self.dealer_hand, self.deck)
+        p_val = casino_games.hand_value(self.player_hand)
+        d_val = casino_games.hand_value(self.dealer_hand)
+
+        if d_val > 21:
+            payout = int(round(self.bet * casino_games.BLACKJACK_WIN_PAYOUT))
+            await self._settle(interaction, "dealer_bust", payout=payout)
+        elif d_val > p_val:
+            await self._settle(interaction, "dealer_wins", payout=0)
+        elif d_val < p_val:
+            payout = int(round(self.bet * casino_games.BLACKJACK_WIN_PAYOUT))
+            await self._settle(interaction, "player_wins", payout=payout)
+        else:
+            await self._settle(interaction, "push", payout=self.bet)
+
+    async def _settle(self, interaction, reason, payout):
+        for child in self.children:
+            child.disabled = True
+
+        outcome = await gambling.apply_bet(
+            guild_id=self.ctx.guild.id,
+            user_id=self.ctx.author.id,
+            user_name=self.ctx.author.display_name,
+            game="blackjack",
+            bet=self.bet,
+            payout=payout,
+            metadata={
+                "player_hand": [f"{r}{s}" for r, s in self.player_hand],
+                "dealer_hand": [f"{r}{s}" for r, s in self.dealer_hand],
+                "player_total": casino_games.hand_value(self.player_hand),
+                "dealer_total": casino_games.hand_value(self.dealer_hand),
+                "result": reason,
+            },
+        )
+        if outcome is None or outcome.get("error"):
+            err = (outcome or {}).get("error", "DB unavailable")
+            await interaction.response.edit_message(
+                embed=discord.Embed(
+                    title="🃏 Blackjack — Bet failed",
+                    description=f"Couldn't settle bet: `{err}`.",
+                    color=0xE74C3C,
+                ),
+                view=self,
+            )
+            return
+
+        net = outcome["net"]
+        new_bank = outcome["new_bank"]
+        p_val = casino_games.hand_value(self.player_hand)
+        d_val = casino_games.hand_value(self.dealer_hand)
+
+        labels = {
+            "player_blackjack": ("🎯 BLACKJACK", 0xF1C40F),
+            "dealer_blackjack": ("💀 Dealer Blackjack", 0xE74C3C),
+            "player_bust":      ("💀 BUST", 0xE74C3C),
+            "dealer_bust":      ("✅ Dealer Bust — you win!", 0x2ECC71),
+            "player_wins":      (f"✅ You win  ({p_val} vs {d_val})", 0x2ECC71),
+            "dealer_wins":      (f"💀 Dealer wins  ({d_val} vs {p_val})", 0xE74C3C),
+            "push":             ("⏸️ Push", 0x95A5A6),
+        }
+        title_tag, color = labels[reason]
+
+        if net > 0:
+            settle_line = f"**+${net:,}**"
+        elif net == 0:
+            settle_line = f"**${self.bet:,} refunded** (push)"
+        else:
+            settle_line = f"**−${abs(net):,}**"
+
+        embed = discord.Embed(
+            title=f"\U0001f0cf Blackjack — ${self.bet:,} • {self.ctx.author.display_name}",
+            description=(
+                f"**Dealer:** {casino_games.format_hand(self.dealer_hand)}  (**{d_val}**)\n"
+                f"**You:** {casino_games.format_hand(self.player_hand)}  (**{p_val}**)\n\n"
+                f"## {title_tag}\n{settle_line}\nBank: **${new_bank:,}**"
+            ),
+            color=color,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+@bot.hybrid_command(description="Play blackjack — hit or stand to get closer to 21 than the dealer")
+async def blackjack(ctx):
+    """Open a blackjack bet picker."""
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+
+    state = await gambling.get_or_create_bank(ctx.guild.id)
+    if not state:
+        await ctx.send("Casino DB not available. Try again later.")
+        return
+
+    bank = state["bank"]
+    day_start = state["day_start_bank"]
+    if bank <= 0:
+        await ctx.send("\U0001f4b8 Bank is empty. Wait for midnight settle.")
+        return
+
+    embed = discord.Embed(
+        title="\U0001f0cf Blackjack",
+        description=(
+            f"Bank: **${bank:,}**  •  Day-start cap: **${day_start:,}**\n\n"
+            "**Rules:**\n"
+            "• Beat the dealer's hand without going over 21\n"
+            "• Dealer hits to 17 and stands. Aces count as 11 or 1\n"
+            f"• Win pays **{casino_games.BLACKJACK_WIN_PAYOUT}x** • "
+            f"Blackjack pays **{casino_games.BLACKJACK_NATURAL_PAYOUT}x** • Push refunds\n\n"
+            "Pick your bet:"
+        ),
+        color=0x2C3E50,
+    )
+    view = BlackjackView(ctx, day_start, bank)
     await ctx.send(embed=embed, view=view)
 
 

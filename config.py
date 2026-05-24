@@ -44,3 +44,10 @@ if not CASINO_CHANNEL_ID:
 GAMBLING_SEED_BANK = int(os.getenv("GAMBLING_SEED_BANK", "1000"))
 GAMBLING_BASE_DEBT = int(os.getenv("GAMBLING_BASE_DEBT", "1200"))
 GAMBLING_DEBT_MULTIPLIER = float(os.getenv("GAMBLING_DEBT_MULTIPLIER", "1.4"))
+
+# Per-game max-bet ratio against day_start_bank.
+# Mirrors the original game's per-table bet caps (slots is the most restricted).
+# Games not listed default to 1.0 (full day_start_bank).
+GAMBLING_GAME_CAPS = {
+    "slots": 0.5,
+}

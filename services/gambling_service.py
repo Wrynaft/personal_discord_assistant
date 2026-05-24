@@ -154,13 +154,21 @@ class GamblingService:
                 )
                 return {"new_bank": new_bank, "net": net}
 
-    def compute_bet_options(self, day_start_bank, current_bank):
-        """Compute the three bet button amounts and whether each is affordable."""
-        quarter = day_start_bank // 4
-        half = day_start_bank // 2
-        full = day_start_bank
+    def compute_bet_options(self, day_start_bank, current_bank, game=None):
+        """Compute the three bet button amounts and whether each is affordable.
+
+        If `game` is provided, the cap is shrunk by config.GAMBLING_GAME_CAPS[game]
+        (defaults to 1.0). Mirrors the original game's per-table bet caps.
+        """
+        cap_ratio = config.GAMBLING_GAME_CAPS.get(game, 1.0) if game else 1.0
+        cap = int(day_start_bank * cap_ratio)
+        quarter = cap // 4
+        half = cap // 2
+        full = cap
         return {
             "quarter": {"amount": quarter, "enabled": current_bank >= quarter > 0},
             "half":    {"amount": half,    "enabled": current_bank >= half    > 0},
             "max":     {"amount": full,    "enabled": current_bank >= full    > 0},
+            "cap":     cap,
+            "cap_ratio": cap_ratio,
         }
