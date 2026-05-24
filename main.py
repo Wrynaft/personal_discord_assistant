@@ -11,6 +11,7 @@ from services.stats_service import StatsService
 from services.sentiment_service import SentimentService
 from services.danbooru_service import DanbooruService
 from services.mimic_service import MimicService
+from services.gambling_service import GamblingService
 from services import search_service
 
 # Malaysian Time = UTC+8
@@ -35,6 +36,20 @@ stats_service = StatsService()
 sentiment_svc = SentimentService()
 danbooru = DanbooruService()
 mimic_svc = MimicService()
+gambling = GamblingService()
+
+
+async def _enforce_casino_channel(ctx):
+    """Restrict casino commands to CASINO_CHANNEL_ID. Returns True if allowed."""
+    if not config.CASINO_CHANNEL_ID:
+        await ctx.send("Casino is disabled (CASINO_CHANNEL_ID not configured).", ephemeral=True)
+        return False
+    if ctx.channel.id != config.CASINO_CHANNEL_ID:
+        channel = bot.get_channel(config.CASINO_CHANNEL_ID)
+        mention = channel.mention if channel else f"<#{config.CASINO_CHANNEL_ID}>"
+        await ctx.send(f"Casino commands only work in {mention}.", ephemeral=True)
+        return False
+    return True
 
 # Store recent news context keyed by message ID for follow-up queries
 _news_context = {}
@@ -273,6 +288,13 @@ async def on_ready():
         print('Mimic: Connected to PostgreSQL')
     except Exception as e:
         print(f'Warning: Mimic DB not available ({e}). !mimic command disabled.')
+
+    # Connect gambling service
+    try:
+        await gambling.connect()
+        print('Gambling: Connected to PostgreSQL')
+    except Exception as e:
+        print(f'Warning: Gambling DB not available ({e}). Casino commands disabled.')
 
     # Start daily schedulers
     if config.NEWS_CHANNEL_ID:
@@ -768,6 +790,72 @@ async def mimic(ctx, user: discord.Member, *, prompt: str = ""):
         )
         embed.set_footer(text=f"Responding to: {prompt[:80]}")
         await ctx.send(embed=embed)
+
+@bot.hybrid_command(description="Show the shared casino bank, debt, and today's bet sizes")
+async def balance(ctx):
+    """Show the shared casino bank state."""
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+
+    state = await gambling.get_or_create_bank(ctx.guild.id)
+    if not state:
+        await ctx.send("Casino DB not available. Try again later.")
+        return
+
+    bank = state["bank"]
+    debt = state["current_debt"]
+    day_start = state["day_start_bank"]
+    day = state["day_number"]
+    options = gambling.compute_bet_options(day_start, bank)
+
+    # Time until midnight MYT
+    now = datetime.now(MYT)
+    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    delta = tomorrow - now
+    hours, remainder = divmod(int(delta.total_seconds()), 3600)
+    minutes = remainder // 60
+
+    # Progress bar — fraction of debt covered
+    pct = min(100, int(bank / debt * 100)) if debt > 0 else 100
+    filled = pct // 10
+    bar = "█" * filled + "░" * (10 - filled)
+
+    embed = discord.Embed(
+        title=f"\U0001f3b0 Casino — Day {day}",
+        color=0x2ECC71 if bank >= debt else 0xE74C3C,
+    )
+    embed.add_field(name="\U0001f4b0 Bank", value=f"**${bank:,}**", inline=True)
+    embed.add_field(name="\U0001f4cb Today's Debt", value=f"${debt:,}", inline=True)
+    embed.add_field(name="\U0001f512 Day-start Cap", value=f"${day_start:,}", inline=True)
+    embed.add_field(
+        name=f"\U0001f4ca Quota Progress — {pct}%",
+        value=f"`{bar}` ${bank:,} / ${debt:,}",
+        inline=False,
+    )
+
+    def mark(opt):
+        return "✅" if opt["enabled"] else "❌"
+
+    embed.add_field(
+        name="\U0001f3af Bet Sizes (locked to day-start bank)",
+        value=(
+            f"`¼`  ${options['quarter']['amount']:,} {mark(options['quarter'])}\n"
+            f"`½`  ${options['half']['amount']:,} {mark(options['half'])}\n"
+            f"`MAX` ${options['max']['amount']:,} {mark(options['max'])}"
+        ),
+        inline=True,
+    )
+    embed.add_field(name="⏰ Settle In", value=f"{hours}h {minutes}m", inline=True)
+
+    started = state["streak_started_at"]
+    embed.set_footer(text=f"Run started {started.strftime('%Y-%m-%d')} • Midnight MYT settle")
+    embed.timestamp = datetime.now(MYT)
+
+    await ctx.send(embed=embed)
+
 
 @bot.event
 async def on_message(message):

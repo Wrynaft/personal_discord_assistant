@@ -34,3 +34,13 @@ SUPERSET_URL = os.getenv("SUPERSET_URL", "")
 _danbooru_channel = os.getenv("DANBOORU_CHANNEL_ID")
 DANBOORU_CHANNEL_ID = int(_danbooru_channel) if _danbooru_channel else None
 DANBOORU_DEFAULT_TAGS = os.getenv("DANBOORU_DEFAULT_TAGS", "")
+
+# Casino / gambling
+_casino_channel = os.getenv("CASINO_CHANNEL_ID")
+CASINO_CHANNEL_ID = int(_casino_channel) if _casino_channel else None
+if not CASINO_CHANNEL_ID:
+    print("Warning: CASINO_CHANNEL_ID not set. Casino commands will be disabled.")
+
+GAMBLING_SEED_BANK = int(os.getenv("GAMBLING_SEED_BANK", "1000"))
+GAMBLING_BASE_DEBT = int(os.getenv("GAMBLING_BASE_DEBT", "1200"))
+GAMBLING_DEBT_MULTIPLIER = float(os.getenv("GAMBLING_DEBT_MULTIPLIER", "1.4"))
