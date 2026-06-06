@@ -3278,6 +3278,77 @@ async def leaderboard(ctx):
     await ctx.send(embed=embed)
 
 
+async def _enforce_owner(ctx):
+    """Owner-only gate. Uses Discord's application owner — no extra config needed."""
+    if not await bot.is_owner(ctx.author):
+        await ctx.send("Only the bot owner can use this command.", ephemeral=True)
+        return False
+    return True
+
+
+@bot.hybrid_command(description="[Owner] Force the midnight settle to run now")
+async def endday(ctx):
+    """Force-run the daily settle now. Survives or busts based on current bank vs debt."""
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+    if not await _enforce_owner(ctx):
+        return
+
+    result = await gambling.settle_day(ctx.guild.id)
+    if not result:
+        await ctx.send("No bank state to settle.")
+        return
+
+    now = datetime.now(MYT)
+    if result["outcome"] == "survived":
+        # Stats for the last 24h leading into this manual settle
+        stats = await gambling.get_player_stats(
+            ctx.guild.id, now - timedelta(days=1), now,
+        )
+        await _post_settle_survived(ctx.channel, result, stats)
+    else:
+        run_stats = await gambling.get_player_stats(
+            ctx.guild.id, result["streak_started_at"], now,
+        )
+        await _post_settle_reset(ctx.channel, result, run_stats)
+
+
+@bot.hybrid_command(description="[Owner] Hard reset the run to Day 1 + seed bank (wipes tickets and items)")
+async def resetrun(ctx):
+    """Wipe the current run regardless of bank state. Owner-only escape hatch."""
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+    if not await _enforce_owner(ctx):
+        return
+
+    result = await gambling.force_reset(ctx.guild.id)
+    if not result:
+        await ctx.send("No bank state to reset.")
+        return
+
+    embed = discord.Embed(
+        title="\U0001f504 Run force-reset by owner",
+        description=(
+            f"Previous state: Day {result['prior_day']}, bank **${result['prior_bank']:,}**, "
+            f"{result['prior_tickets']} 🎟️ • run since "
+            f"{result['prior_streak_started_at'].strftime('%Y-%m-%d')}\n\n"
+            f"🔄 Fresh start: **${result['seed']:,}** seed, "
+            f"Day 1 quota **${result['new_debt']:,}**\n"
+            f"Inventory wiped • Active effects cleared • Tickets reset to 0"
+        ),
+        color=0xE67E22,
+    )
+    embed.set_footer(text=f"Reset by {ctx.author.display_name}")
+    embed.timestamp = datetime.now(MYT)
+    await ctx.send(embed=embed)
+
+
 @bot.hybrid_command(description="Show a player's lifetime casino stats")
 async def profile(ctx, user: discord.Member = None):
     """Per-user lifetime + current-run stats card."""

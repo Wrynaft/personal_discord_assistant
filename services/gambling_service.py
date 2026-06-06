@@ -269,6 +269,49 @@ class GamblingService:
             rows = await self.pool.fetch(query, guild_id, start_time, end_time)
         return [dict(r) for r in rows]
 
+    async def force_reset(self, guild_id):
+        """Hard reset back to Day 1: seed bank, base debt, tickets/inventory/effects wiped.
+
+        Returns the prior bank state so a "before" snapshot can be shown.
+        """
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                prior = await conn.fetchrow(
+                    "SELECT * FROM gambling_bank WHERE guild_id = $1 FOR UPDATE",
+                    guild_id,
+                )
+                if not prior:
+                    return None
+                await conn.execute(
+                    """
+                    UPDATE gambling_bank
+                    SET bank = $2, day_start_bank = $2,
+                        current_debt = $3, day_number = 1,
+                        tickets = 0,
+                        streak_started_at = NOW(),
+                        updated_at = NOW()
+                    WHERE guild_id = $1
+                    """,
+                    guild_id, config.GAMBLING_SEED_BANK, config.GAMBLING_BASE_DEBT,
+                )
+                await conn.execute(
+                    "DELETE FROM gambling_inventory WHERE guild_id = $1", guild_id,
+                )
+                await conn.execute(
+                    "DELETE FROM gambling_active_effects WHERE guild_id = $1", guild_id,
+                )
+                return {
+                    "prior_bank": prior["bank"],
+                    "prior_day": prior["day_number"],
+                    "prior_debt": prior["current_debt"],
+                    "prior_tickets": prior["tickets"] or 0,
+                    "prior_streak_started_at": prior["streak_started_at"],
+                    "seed": config.GAMBLING_SEED_BANK,
+                    "new_debt": config.GAMBLING_BASE_DEBT,
+                }
+
     async def get_user_profile(self, guild_id, user_id, streak_started_at):
         """Aggregate lifetime + current-run stats for one user."""
         if not self.pool:
