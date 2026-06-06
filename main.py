@@ -14,6 +14,7 @@ from services.mimic_service import MimicService
 from services.gambling_service import GamblingService
 from services import search_service
 from services import casino_games
+from services import casino_items
 
 # Malaysian Time = UTC+8
 MYT = timezone(timedelta(hours=8))
@@ -51,6 +52,32 @@ async def _enforce_casino_channel(ctx):
         await ctx.send(f"Casino commands only work in {mention}.", ephemeral=True)
         return False
     return True
+
+
+def _format_applied_effects(applied):
+    """Render passive effects triggered by a bet as a multi-line string. None if empty."""
+    if not applied:
+        return None
+    lines = []
+    for a in applied:
+        delta = a.get("delta") or 0
+        if delta:
+            sign = "+" if delta >= 0 else "−"
+            lines.append(f"{a['emoji']}  **{a['name']}** — {a['summary']} ({sign}${abs(delta):,})")
+        else:
+            lines.append(f"{a['emoji']}  **{a['name']}** — {a['summary']}")
+    return "\n".join(lines)
+
+
+def _augment_settle_description(desc, outcome):
+    """Append item-effect and ticket-bonus blocks to a bet's settle description."""
+    extras = []
+    block = _format_applied_effects(outcome.get("effects_applied"))
+    if block:
+        extras.append(f"\n**Items used:**\n{block}")
+    if outcome.get("ticket_bonus"):
+        extras.append(f"\n🎟️ +{outcome['ticket_bonus']} tickets (jackpot!)")
+    return desc + "".join(extras)
 
 # Store recent news context keyed by message ID for follow-up queries
 _news_context = {}
@@ -406,12 +433,15 @@ def _format_player_stats(stats):
 
 
 async def _post_settle_survived(channel, result, stats):
+    bonus = result.get("tickets_awarded", 0)
+    total_tickets = result.get("tickets_after", 0)
     embed = discord.Embed(
         title=f"\U0001f319 Day {result['old_day']} Settled — Survived",
         description=(
             f"Bank: **${result['bank_before']:,}** → paid **${result['debt_paid']:,}** debt → "
             f"**${result['carryover']:,}** carries into Day {result['new_day']}\n\n"
-            f"Day {result['new_day']} quota: **${result['next_debt']:,}**"
+            f"Day {result['new_day']} quota: **${result['next_debt']:,}**\n"
+            f"🎟️ **+{bonus}** tickets (total: {total_tickets})"
         ),
         color=0x2ECC71,
     )
@@ -426,13 +456,15 @@ async def _post_settle_survived(channel, result, stats):
 async def _post_settle_reset(channel, result, run_stats):
     started = result["streak_started_at"]
     duration_days = result["old_day"]
+    lost = result.get("tickets_lost", 0)
+    tickets_line = f"\n🎟️ **{lost}** tickets lost • Inventory wiped" if lost > 0 else "\nInventory wiped on bust."
     embed = discord.Embed(
         title=f"\U0001f480 RUN ENDED — Day {result['old_day']} Bust",
         description=(
             f"Bank was **${result['bank_before']:,}**, needed **${result['debt_owed']:,}**. "
             f"Short by **${result['missing']:,}**.\n\n"
             f"Run lasted **{duration_days}** day{'s' if duration_days != 1 else ''} since "
-            f"{started.strftime('%Y-%m-%d')}.\n\n"
+            f"{started.strftime('%Y-%m-%d')}.{tickets_line}\n\n"
             f"🔄 Fresh run starts: **${result['seed']:,}** seed, "
             f"Day 1 quota **${config.GAMBLING_BASE_DEBT:,}**"
         ),
@@ -971,18 +1003,24 @@ class SlotBetView(discord.ui.View):
             title = f"\U0001f3b0 {self.ctx.author.display_name} hit {result['match_name']}s!"
             desc = (
                 f"## {reels_line}\n"
-                f"**+${payout - bet:,}** ({result['multiplier']}x payout on ${bet:,})\n"
+                f"**+${net:,}** ({result['multiplier']}x payout on ${bet:,})\n"
                 f"Bank: **${new_bank:,}**"
             )
         else:
-            color = 0xE74C3C
+            if net >= 0:
+                color = 0x95A5A6
+                amount_line = "_rescued — broke even_" if net == 0 else f"**+${net:,}** (item bonus)"
+            else:
+                color = 0xE74C3C
+                amount_line = f"**−${abs(net):,}**"
             title = f"\U0001f3b0 {self.ctx.author.display_name} spun and lost"
             desc = (
                 f"## {reels_line}\n"
-                f"No match. **−${bet:,}**\n"
+                f"No match. {amount_line}\n"
                 f"Bank: **${new_bank:,}**"
             )
 
+        desc = _augment_settle_description(desc, outcome)
         embed = discord.Embed(title=title, description=desc, color=color)
         await interaction.response.edit_message(embed=embed, view=self)
 
@@ -1173,12 +1211,13 @@ class DiceView(discord.ui.View):
         else:
             settle_line = f"**${self.bet:,} refunded**"
 
+        desc = _augment_settle_description(
+            f"{history}\n\n## {title_tag}\n{settle_line}\nBank: **${new_bank:,}**",
+            outcome,
+        )
         embed = discord.Embed(
             title=f"\U0001f3b2 Dice — ${self.bet:,} bet • {self.ctx.author.display_name}",
-            description=(
-                f"{history}\n\n"
-                f"## {title_tag}\n{settle_line}\nBank: **${new_bank:,}**"
-            ),
+            description=desc,
             color=color,
         )
         await interaction.response.edit_message(embed=embed, view=self)
@@ -1356,9 +1395,9 @@ class WheelView(discord.ui.View):
 
         embed = discord.Embed(
             title=f"🎡 Wheel — ${bet:,} bet • {self.ctx.author.display_name}",
-            description=(
-                f"## {result['emoji']}  {result['label']}\n"
-                f"{settle_line}\nBank: **${new_bank:,}**"
+            description=_augment_settle_description(
+                f"## {result['emoji']}  {result['label']}\n{settle_line}\nBank: **${new_bank:,}**",
+                outcome,
             ),
             color=color,
         )
@@ -1549,9 +1588,9 @@ class HorseRaceView(discord.ui.View):
 
         embed = discord.Embed(
             title=f"\U0001f40e Horse Race — ${bet:,} bet • {self.ctx.author.display_name}",
-            description=(
-                "\n".join(lines)
-                + f"\n\n{settle_line}\nBank: **${new_bank:,}**"
+            description=_augment_settle_description(
+                "\n".join(lines) + f"\n\n{settle_line}\nBank: **${new_bank:,}**",
+                outcome,
             ),
             color=color,
         )
@@ -1789,10 +1828,11 @@ class BlackjackView(discord.ui.View):
 
         embed = discord.Embed(
             title=f"\U0001f0cf Blackjack — ${self.bet:,} • {self.ctx.author.display_name}",
-            description=(
+            description=_augment_settle_description(
                 f"**Dealer:** {casino_games.format_hand(self.dealer_hand)}  (**{d_val}**)\n"
                 f"**You:** {casino_games.format_hand(self.player_hand)}  (**{p_val}**)\n\n"
-                f"## {title_tag}\n{settle_line}\nBank: **${new_bank:,}**"
+                f"## {title_tag}\n{settle_line}\nBank: **${new_bank:,}**",
+                outcome,
             ),
             color=color,
         )
@@ -1894,6 +1934,16 @@ async def balance(ctx):
         inline=True,
     )
     embed.add_field(name="⏰ Settle In", value=f"{hours}h {minutes}m", inline=True)
+    embed.add_field(name="🎟️ Tickets", value=f"**{state['tickets'] or 0}**", inline=True)
+
+    active = await gambling.get_active_effects(ctx.guild.id)
+    if active:
+        eff_lines = []
+        for e in active:
+            defn = casino_items.item(e["item_id"])
+            if defn:
+                eff_lines.append(f"{defn['emoji']} {defn['name']} × {e['charges_left']}")
+        embed.add_field(name="✨ Active Effects", value="\n".join(eff_lines), inline=False)
 
     started = state["streak_started_at"]
     embed.set_footer(text=f"Run started {started.strftime('%Y-%m-%d')} • Midnight MYT settle")
@@ -1923,7 +1973,8 @@ async def casino(ctx):
         name="\U0001f4ca Status",
         value=(
             "`/balance` — Bank, debt, day-start cap, time until settle\n"
-            "`/leaderboard` — Top players for the current run"
+            "`/leaderboard` — Top players for the current run\n"
+            "`/tickets` — Ticket balance + earning rates"
         ),
         inline=False,
     )
@@ -1939,6 +1990,15 @@ async def casino(ctx):
         inline=False,
     )
     embed.add_field(
+        name="\U0001f6cd Items",
+        value=(
+            "`/shop` — Browse and buy items with tickets\n"
+            "`/inventory` — See owned items and active effects\n"
+            "`/use` — Activate an item from inventory"
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="\U0001f4b0 Bet Sizes",
         value=(
             "Each game offers `¼`, `½`, `MAX` buttons. "
@@ -1949,6 +2009,319 @@ async def casino(ctx):
     )
     embed.set_footer(text=f"Seed: ${config.GAMBLING_SEED_BANK:,} • Day 1 debt: ${config.GAMBLING_BASE_DEBT:,} • Quota grows {config.GAMBLING_DEBT_MULTIPLIER}x daily")
     await ctx.send(embed=embed)
+
+
+# ── Items: tickets / shop / inventory / use ──────────────────────────
+
+@bot.hybrid_command(description="Show your ticket balance and how to earn more")
+async def tickets(ctx):
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+    state = await gambling.get_or_create_bank(ctx.guild.id)
+    if not state:
+        await ctx.send("Casino DB not available.")
+        return
+
+    embed = discord.Embed(
+        title="\U0001f39f Tickets",
+        description=f"Shared ticket balance: **{state['tickets'] or 0}** 🎟️",
+        color=0xF39C12,
+    )
+    embed.add_field(
+        name="How to earn",
+        value=(
+            f"• Clear the daily quota: **+{casino_items.TICKETS_PER_DAY_CLEARED}** 🎟️\n"
+            f"• Land a jackpot (≥10x payout): **+{casino_items.TICKETS_PER_JACKPOT}** 🎟️\n"
+            "_Tickets reset to 0 if the run busts._"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Spend tickets in /shop")
+    await ctx.send(embed=embed)
+
+
+class _ShopBuyButton(discord.ui.Button):
+    def __init__(self, item_id, defn, affordable):
+        super().__init__(
+            label=f"{defn['emoji']} {defn['name']}  ({defn['cost']}🎟)",
+            style=discord.ButtonStyle.primary if affordable else discord.ButtonStyle.secondary,
+            disabled=not affordable,
+        )
+        self.item_id = item_id
+        self.defn = defn
+
+    async def callback(self, interaction):
+        view: ShopView = self.view
+        await view._buy(interaction, self.item_id, self.defn)
+
+
+class ShopView(discord.ui.View):
+    """One buy button per item; refreshes the embed after each purchase."""
+
+    def __init__(self, ctx, tickets_balance):
+        super().__init__(timeout=120)
+        self.ctx = ctx
+        self.tickets_balance = tickets_balance
+        self._rebuild_buttons()
+
+    def _rebuild_buttons(self):
+        self.clear_items()
+        for item_id, defn in casino_items.ITEMS.items():
+            self.add_item(_ShopBuyButton(item_id, defn, self.tickets_balance >= defn["cost"]))
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "That shop isn't yours — run `/shop` to open your own.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+    async def _buy(self, interaction, item_id, defn):
+        result = await gambling.buy_item(self.ctx.guild.id, item_id, defn["cost"])
+        if not result or result.get("error"):
+            err = (result or {}).get("error", "DB unavailable")
+            if err == "insufficient_tickets":
+                msg = f"Not enough tickets: have {result['have']}, need {result['need']}."
+            else:
+                msg = f"Couldn't buy: `{err}`"
+            await interaction.response.send_message(msg, ephemeral=True)
+            return
+
+        self.tickets_balance = result["tickets_remaining"]
+        self._rebuild_buttons()
+
+        embed = _build_shop_embed(self.tickets_balance, note=f"✅ Bought {defn['emoji']} {defn['name']} for {defn['cost']}🎟")
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+def _build_shop_embed(tickets_balance, note=None):
+    lines = []
+    for item_id, defn in casino_items.ITEMS.items():
+        lines.append(
+            f"{defn['emoji']}  **{defn['name']}** — {defn['cost']}🎟️\n"
+            f"   _{defn['description']}_"
+        )
+    embed = discord.Embed(
+        title="\U0001f6cd Casino Shop",
+        description=(note + "\n\n" if note else "") + (
+            f"Tickets: **{tickets_balance}** 🎟️\n\n" + "\n\n".join(lines)
+        ),
+        color=0x9B59B6,
+    )
+    embed.set_footer(text="Buttons below buy one of each • Items are shared with the whole server")
+    return embed
+
+
+@bot.hybrid_command(description="Browse and buy casino items with tickets")
+async def shop(ctx):
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+    state = await gambling.get_or_create_bank(ctx.guild.id)
+    if not state:
+        await ctx.send("Casino DB not available.")
+        return
+    tickets_balance = state["tickets"] or 0
+    embed = _build_shop_embed(tickets_balance)
+    view = ShopView(ctx, tickets_balance)
+    await ctx.send(embed=embed, view=view)
+
+
+@bot.hybrid_command(description="Show owned items and currently active effects")
+async def inventory(ctx):
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+
+    inv = await gambling.get_inventory(ctx.guild.id)
+    effects = await gambling.get_active_effects(ctx.guild.id)
+
+    embed = discord.Embed(title="\U0001f392 Inventory", color=0x9B59B6)
+
+    if inv:
+        owned_lines = []
+        for item_id, count in inv.items():
+            defn = casino_items.item(item_id)
+            if defn:
+                owned_lines.append(f"{defn['emoji']}  **{defn['name']}** × {count}")
+        embed.add_field(name="Owned", value="\n".join(owned_lines), inline=False)
+    else:
+        embed.add_field(name="Owned", value="_Nothing yet — visit `/shop`_", inline=False)
+
+    if effects:
+        eff_lines = []
+        for e in effects:
+            defn = casino_items.item(e["item_id"])
+            if defn:
+                charges = e["charges_left"]
+                charge_label = f"{charges} charge{'s' if charges != 1 else ''}"
+                eff_lines.append(f"{defn['emoji']}  **{defn['name']}** — {charge_label} left")
+        embed.add_field(name="Active (auto-applies)", value="\n".join(eff_lines), inline=False)
+    else:
+        embed.add_field(name="Active (auto-applies)", value="_No effects armed_", inline=False)
+
+    embed.set_footer(text="Activate with /use • Items wipe on bust")
+    await ctx.send(embed=embed)
+
+
+class _UseItemButton(discord.ui.Button):
+    def __init__(self, item_id, defn, count):
+        super().__init__(
+            label=f"{defn['emoji']} {defn['name']}  (×{count})",
+            style=discord.ButtonStyle.primary,
+        )
+        self.item_id = item_id
+        self.defn = defn
+
+    async def callback(self, interaction):
+        view: UseItemView = self.view
+        await view._use(interaction, self.item_id, self.defn)
+
+
+class UseItemView(discord.ui.View):
+    """One button per owned item; click to activate it."""
+
+    def __init__(self, ctx, inventory):
+        super().__init__(timeout=120)
+        self.ctx = ctx
+        for item_id, count in inventory.items():
+            defn = casino_items.item(item_id)
+            if defn:
+                self.add_item(_UseItemButton(item_id, defn, count))
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(
+                "Not your item-use session — run `/use` to open your own.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+    async def _use(self, interaction, item_id, defn):
+        for child in self.children:
+            child.disabled = True
+
+        if defn["trigger"] == "passive":
+            result = await gambling.activate_passive(
+                self.ctx.guild.id, item_id, self.ctx.author.id, defn["charges"],
+            )
+            if not result or result.get("error"):
+                err = (result or {}).get("error", "DB unavailable")
+                await interaction.response.edit_message(
+                    embed=discord.Embed(
+                        title="Item use failed",
+                        description=f"`{err}`",
+                        color=0xE74C3C,
+                    ),
+                    view=self,
+                )
+                return
+            embed = discord.Embed(
+                title=f"{defn['emoji']} {defn['name']} armed",
+                description=(
+                    f"{defn['description']}\n\n"
+                    f"**Charges:** {defn['charges']}\n"
+                    "It'll auto-trigger on the next qualifying bet."
+                ),
+                color=0x2ECC71,
+            )
+            await interaction.response.edit_message(embed=embed, view=self)
+            return
+
+        # Active items
+        if item_id == "quota_gun":
+            result = await gambling.use_quota_gun(self.ctx.guild.id, self.ctx.author.id)
+            if not result or result.get("error"):
+                err = (result or {}).get("error", "DB unavailable")
+                await interaction.response.edit_message(
+                    embed=discord.Embed(
+                        title="Item use failed",
+                        description=f"`{err}`",
+                        color=0xE74C3C,
+                    ),
+                    view=self,
+                )
+                return
+            embed = discord.Embed(
+                title=f"{defn['emoji']} {defn['name']} fired",
+                description=(
+                    f"Debt reduced by **${result['reduced_by']:,}** "
+                    f"({int(casino_items.QUOTA_GUN_PAYOFF_PCT * 100)}%)\n"
+                    f"Today's debt: ~~${result['old_debt']:,}~~ → **${result['new_debt']:,}**"
+                ),
+                color=0x2ECC71,
+            )
+            await interaction.response.edit_message(embed=embed, view=self)
+            return
+
+        if item_id == "time_machine":
+            result = await gambling.use_time_machine(self.ctx.guild.id, self.ctx.author.id)
+            if not result or result.get("error"):
+                err = (result or {}).get("error", "DB unavailable")
+                msg = {
+                    "not_owned": "You don't own a Time Machine.",
+                    "no_recent_bet": "No recent bet to reverse.",
+                }.get(err, f"`{err}`")
+                await interaction.response.edit_message(
+                    embed=discord.Embed(
+                        title="Item use failed",
+                        description=msg,
+                        color=0xE74C3C,
+                    ),
+                    view=self,
+                )
+                return
+            net = result["reversed_net"]
+            sign = "+" if net >= 0 else "−"
+            embed = discord.Embed(
+                title=f"{defn['emoji']} {defn['name']} activated",
+                description=(
+                    f"Reversed **{result['reversed_user']}**'s `/{result['reversed_game']}` bet of "
+                    f"**${result['reversed_bet']:,}** (net was {sign}${abs(net):,}).\n"
+                    "Bank restored to its prior state."
+                ),
+                color=0x9B59B6,
+            )
+            await interaction.response.edit_message(embed=embed, view=self)
+            return
+
+
+@bot.hybrid_command(description="Activate an item from inventory")
+async def use(ctx):
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+    inv = await gambling.get_inventory(ctx.guild.id)
+    if not inv:
+        await ctx.send("Inventory is empty. Visit `/shop` first.")
+        return
+    view = UseItemView(ctx, inv)
+    embed = discord.Embed(
+        title="\U0001f6cd Use an item",
+        description="Click an item below to activate it.\nPassive items arm for next bet; active items fire immediately.",
+        color=0x9B59B6,
+    )
+    await ctx.send(embed=embed, view=view)
 
 
 @bot.hybrid_command(description="Show the casino leaderboard for the current run")

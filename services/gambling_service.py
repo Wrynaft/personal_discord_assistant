@@ -2,6 +2,7 @@ import asyncpg
 import json
 import config
 from datetime import datetime, timezone, timedelta
+from services import casino_items
 
 MYT = timezone(timedelta(hours=8))
 
@@ -70,15 +71,18 @@ class GamblingService:
                         config.GAMBLING_BASE_DEBT
                         * (config.GAMBLING_DEBT_MULTIPLIER ** (new_day - 1))
                     ))
+                    ticket_bonus = casino_items.TICKETS_PER_DAY_CLEARED
+                    new_tickets = (row["tickets"] or 0) + ticket_bonus
                     await conn.execute(
                         """
                         UPDATE gambling_bank
                         SET bank = $2, day_start_bank = $2,
                             current_debt = $3, day_number = $4,
+                            tickets = $5,
                             updated_at = NOW()
                         WHERE guild_id = $1
                         """,
-                        guild_id, new_bank, new_debt, new_day,
+                        guild_id, new_bank, new_debt, new_day, new_tickets,
                     )
                     return {
                         "outcome": "survived",
@@ -89,13 +93,17 @@ class GamblingService:
                         "carryover": new_bank,
                         "next_debt": new_debt,
                         "streak_started_at": row["streak_started_at"],
+                        "tickets_awarded": ticket_bonus,
+                        "tickets_after": new_tickets,
                     }
 
+                # Bust: reset bank state AND wipe tickets/inventory/active effects.
                 await conn.execute(
                     """
                     UPDATE gambling_bank
                     SET bank = $2, day_start_bank = $2,
                         current_debt = $3, day_number = 1,
+                        tickets = 0,
                         streak_started_at = NOW(),
                         updated_at = NOW()
                     WHERE guild_id = $1
@@ -103,6 +111,12 @@ class GamblingService:
                     guild_id,
                     config.GAMBLING_SEED_BANK,
                     config.GAMBLING_BASE_DEBT,
+                )
+                await conn.execute(
+                    "DELETE FROM gambling_inventory WHERE guild_id = $1", guild_id,
+                )
+                await conn.execute(
+                    "DELETE FROM gambling_active_effects WHERE guild_id = $1", guild_id,
                 )
                 return {
                     "outcome": "reset",
@@ -112,22 +126,25 @@ class GamblingService:
                     "missing": debt - bank,
                     "seed": config.GAMBLING_SEED_BANK,
                     "streak_started_at": row["streak_started_at"],
+                    "tickets_lost": row["tickets"] or 0,
                 }
 
     async def apply_bet(self, guild_id, user_id, user_name, game, bet, payout, metadata=None):
-        """Atomically deduct bet, credit payout, and log the transaction.
+        """Atomically deduct bet, credit payout, apply active passive effects, and log.
 
-        Returns: {"new_bank": int, "net": int} on success,
-                 {"error": "insufficient_funds" | "exceeds_cap", ...} on failure.
+        Returns on success: {
+            "new_bank": int, "net": int, "payout": int (after effects),
+            "effects_applied": list[dict], "ticket_bonus": int, "tickets": int
+        }
+        On failure: {"error": "insufficient_funds" | "exceeds_cap", ...}
         """
         if not self.pool:
             return None
-        net = payout - bet
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 row = await conn.fetchrow(
                     """
-                    SELECT bank, day_start_bank FROM gambling_bank
+                    SELECT bank, day_start_bank, tickets FROM gambling_bank
                     WHERE guild_id = $1 FOR UPDATE
                     """,
                     guild_id,
@@ -136,17 +153,65 @@ class GamblingService:
                     return None
                 bank = row["bank"]
                 day_start = row["day_start_bank"]
+                tickets = row["tickets"] or 0
 
                 if bet > bank:
                     return {"error": "insufficient_funds", "bank": bank, "bet": bet}
                 if bet > day_start:
                     return {"error": "exceeds_cap", "cap": day_start, "bet": bet}
 
-                new_bank = bank + net
-                await conn.execute(
-                    "UPDATE gambling_bank SET bank = $2, updated_at = NOW() WHERE guild_id = $1",
-                    guild_id, new_bank,
+                # Fetch active passive effects (oldest first — FIFO consumption)
+                effect_rows = await conn.fetch(
+                    """
+                    SELECT id, item_id, charges_left FROM gambling_active_effects
+                    WHERE guild_id = $1
+                    ORDER BY activated_at ASC
+                    """,
+                    guild_id,
                 )
+                effects = [dict(e) for e in effect_rows]
+
+                final_payout, applied, consumed_ids = casino_items.apply_passive_effects(
+                    bet, payout, effects,
+                )
+
+                # Decrement charges on consumed effects; delete exhausted ones
+                for eff_id in consumed_ids:
+                    await conn.execute(
+                        "UPDATE gambling_active_effects SET charges_left = charges_left - 1 WHERE id = $1",
+                        eff_id,
+                    )
+                await conn.execute(
+                    "DELETE FROM gambling_active_effects WHERE guild_id = $1 AND charges_left <= 0",
+                    guild_id,
+                )
+
+                net = final_payout - bet
+                new_bank = bank + net
+
+                # Jackpot ticket bonus: any win with payout >= 10x the bet
+                ticket_bonus = 0
+                if bet > 0 and payout >= bet * 10:
+                    ticket_bonus = casino_items.TICKETS_PER_JACKPOT
+                    tickets += ticket_bonus
+
+                await conn.execute(
+                    """
+                    UPDATE gambling_bank
+                    SET bank = $2, tickets = $3, updated_at = NOW()
+                    WHERE guild_id = $1
+                    """,
+                    guild_id, new_bank, tickets,
+                )
+
+                tx_metadata = dict(metadata or {})
+                if applied:
+                    tx_metadata["effects_applied"] = [
+                        {"item": a["item_id"], "delta": a["delta"]} for a in applied
+                    ]
+                if ticket_bonus:
+                    tx_metadata["ticket_bonus"] = ticket_bonus
+
                 await conn.execute(
                     """
                     INSERT INTO gambling_transactions
@@ -154,10 +219,17 @@ class GamblingService:
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
                     """,
                     guild_id, user_id, user_name, game,
-                    bet, payout, net,
-                    json.dumps(metadata) if metadata else None,
+                    bet, final_payout, net,
+                    json.dumps(tx_metadata),
                 )
-                return {"new_bank": new_bank, "net": net}
+                return {
+                    "new_bank": new_bank,
+                    "net": net,
+                    "payout": final_payout,
+                    "effects_applied": applied,
+                    "ticket_bonus": ticket_bonus,
+                    "tickets": tickets,
+                }
 
     async def get_player_stats(self, guild_id, start_time, end_time=None):
         """Aggregate per-player stats for a time window. Returns list sorted by net DESC.
@@ -197,8 +269,169 @@ class GamblingService:
             rows = await self.pool.fetch(query, guild_id, start_time, end_time)
         return [dict(r) for r in rows]
 
+    # ── Items / inventory ─────────────────────────────────────────────
+
+    async def get_inventory(self, guild_id):
+        """Return {item_id: count} for items owned by the guild."""
+        if not self.pool:
+            return {}
+        rows = await self.pool.fetch(
+            "SELECT item_id, count FROM gambling_inventory WHERE guild_id = $1 AND count > 0",
+            guild_id,
+        )
+        return {r["item_id"]: r["count"] for r in rows}
+
+    async def get_active_effects(self, guild_id):
+        """Return list of active effect dicts (item_id, charges_left, activated_at, activated_by)."""
+        if not self.pool:
+            return []
+        rows = await self.pool.fetch(
+            """
+            SELECT id, item_id, charges_left, activated_at, activated_by
+            FROM gambling_active_effects
+            WHERE guild_id = $1
+            ORDER BY activated_at ASC
+            """,
+            guild_id,
+        )
+        return [dict(r) for r in rows]
+
+    async def buy_item(self, guild_id, item_id, cost):
+        """Atomically spend tickets and add item to inventory."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT tickets FROM gambling_bank WHERE guild_id = $1 FOR UPDATE",
+                    guild_id,
+                )
+                if not row:
+                    return {"error": "no_bank"}
+                if row["tickets"] < cost:
+                    return {"error": "insufficient_tickets", "have": row["tickets"], "need": cost}
+                await conn.execute(
+                    "UPDATE gambling_bank SET tickets = tickets - $2 WHERE guild_id = $1",
+                    guild_id, cost,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO gambling_inventory (guild_id, item_id, count)
+                    VALUES ($1, $2, 1)
+                    ON CONFLICT (guild_id, item_id)
+                    DO UPDATE SET count = gambling_inventory.count + 1
+                    """,
+                    guild_id, item_id,
+                )
+                return {"tickets_remaining": row["tickets"] - cost}
+
+    async def activate_passive(self, guild_id, item_id, user_id, charges):
+        """Move one of `item_id` from inventory into active effects."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT count FROM gambling_inventory WHERE guild_id = $1 AND item_id = $2 FOR UPDATE",
+                    guild_id, item_id,
+                )
+                if not row or row["count"] <= 0:
+                    return {"error": "not_owned"}
+                await conn.execute(
+                    "UPDATE gambling_inventory SET count = count - 1 WHERE guild_id = $1 AND item_id = $2",
+                    guild_id, item_id,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO gambling_active_effects (guild_id, item_id, charges_left, activated_by)
+                    VALUES ($1, $2, $3, $4)
+                    """,
+                    guild_id, item_id, charges, user_id,
+                )
+                return {"ok": True}
+
+    async def use_quota_gun(self, guild_id, user_id):
+        """Consume one quota_gun, reduce current_debt by configured %."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                inv = await conn.fetchrow(
+                    "SELECT count FROM gambling_inventory WHERE guild_id = $1 AND item_id = 'quota_gun' FOR UPDATE",
+                    guild_id,
+                )
+                if not inv or inv["count"] <= 0:
+                    return {"error": "not_owned"}
+                bank_row = await conn.fetchrow(
+                    "SELECT current_debt FROM gambling_bank WHERE guild_id = $1 FOR UPDATE",
+                    guild_id,
+                )
+                if not bank_row:
+                    return {"error": "no_bank"}
+                debt = bank_row["current_debt"]
+                reduction = int(round(debt * casino_items.QUOTA_GUN_PAYOFF_PCT))
+                new_debt = max(0, debt - reduction)
+                await conn.execute(
+                    "UPDATE gambling_inventory SET count = count - 1 WHERE guild_id = $1 AND item_id = 'quota_gun'",
+                    guild_id,
+                )
+                await conn.execute(
+                    "UPDATE gambling_bank SET current_debt = $2, updated_at = NOW() WHERE guild_id = $1",
+                    guild_id, new_debt,
+                )
+                return {"old_debt": debt, "new_debt": new_debt, "reduced_by": reduction}
+
+    async def use_time_machine(self, guild_id, user_id):
+        """Consume one time_machine and reverse the most recent transaction."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                inv = await conn.fetchrow(
+                    "SELECT count FROM gambling_inventory WHERE guild_id = $1 AND item_id = 'time_machine' FOR UPDATE",
+                    guild_id,
+                )
+                if not inv or inv["count"] <= 0:
+                    return {"error": "not_owned"}
+                last_tx = await conn.fetchrow(
+                    """
+                    SELECT id, net, game, user_name, bet, payout FROM gambling_transactions
+                    WHERE guild_id = $1
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    guild_id,
+                )
+                if not last_tx:
+                    return {"error": "no_recent_bet"}
+                net = last_tx["net"]
+                # Reverse the bank delta and delete the transaction.
+                await conn.execute(
+                    "UPDATE gambling_bank SET bank = bank - $2, updated_at = NOW() WHERE guild_id = $1",
+                    guild_id, net,
+                )
+                await conn.execute(
+                    "DELETE FROM gambling_transactions WHERE id = $1",
+                    last_tx["id"],
+                )
+                await conn.execute(
+                    "UPDATE gambling_inventory SET count = count - 1 WHERE guild_id = $1 AND item_id = 'time_machine'",
+                    guild_id,
+                )
+                return {
+                    "reversed_game": last_tx["game"],
+                    "reversed_user": last_tx["user_name"],
+                    "reversed_bet": last_tx["bet"],
+                    "reversed_net": net,
+                }
+
     def compute_bet_options(self, day_start_bank, current_bank, game=None):
         """Compute the three bet button amounts and whether each is affordable.
+
+        - ¼ and ½ are fixed fractions of the (cap-adjusted) day-start bank; they
+          disable when current_bank can't cover them.
+        - MAX is min(cap, current_bank) so it scales down with the bank — always
+          usable as long as there's any money to bet.
 
         If `game` is provided, the cap is shrunk by config.GAMBLING_GAME_CAPS[game]
         (defaults to 1.0). Mirrors the original game's per-table bet caps.
@@ -207,11 +440,11 @@ class GamblingService:
         cap = int(day_start_bank * cap_ratio)
         quarter = cap // 4
         half = cap // 2
-        full = cap
+        max_amount = min(cap, current_bank) if current_bank > 0 else 0
         return {
-            "quarter": {"amount": quarter, "enabled": current_bank >= quarter > 0},
-            "half":    {"amount": half,    "enabled": current_bank >= half    > 0},
-            "max":     {"amount": full,    "enabled": current_bank >= full    > 0},
+            "quarter": {"amount": quarter,    "enabled": current_bank >= quarter > 0},
+            "half":    {"amount": half,       "enabled": current_bank >= half    > 0},
+            "max":     {"amount": max_amount, "enabled": max_amount > 0},
             "cap":     cap,
             "cap_ratio": cap_ratio,
         }
