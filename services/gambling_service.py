@@ -269,6 +269,69 @@ class GamblingService:
             rows = await self.pool.fetch(query, guild_id, start_time, end_time)
         return [dict(r) for r in rows]
 
+    async def get_user_profile(self, guild_id, user_id, streak_started_at):
+        """Aggregate lifetime + current-run stats for one user."""
+        if not self.pool:
+            return None
+        lifetime = await self.pool.fetchrow(
+            """
+            SELECT
+                count(*)                       AS bet_count,
+                coalesce(sum(bet), 0)          AS total_wagered,
+                coalesce(sum(net), 0)          AS net_total,
+                coalesce(max(net), 0)          AS biggest_win,
+                coalesce(min(net), 0)          AS biggest_loss,
+                count(*) FILTER (WHERE net > 0) AS wins,
+                count(*) FILTER (WHERE net < 0) AS losses
+            FROM gambling_transactions
+            WHERE guild_id = $1 AND user_id = $2
+            """,
+            guild_id, user_id,
+        )
+        if not lifetime or lifetime["bet_count"] == 0:
+            return None
+
+        big_win_row = await self.pool.fetchrow(
+            """
+            SELECT game, net, created_at FROM gambling_transactions
+            WHERE guild_id = $1 AND user_id = $2 AND net > 0
+            ORDER BY net DESC LIMIT 1
+            """,
+            guild_id, user_id,
+        )
+        big_loss_row = await self.pool.fetchrow(
+            """
+            SELECT game, net, created_at FROM gambling_transactions
+            WHERE guild_id = $1 AND user_id = $2 AND net < 0
+            ORDER BY net ASC LIMIT 1
+            """,
+            guild_id, user_id,
+        )
+        fav_row = await self.pool.fetchrow(
+            """
+            SELECT game, count(*) AS plays FROM gambling_transactions
+            WHERE guild_id = $1 AND user_id = $2
+            GROUP BY game ORDER BY plays DESC LIMIT 1
+            """,
+            guild_id, user_id,
+        )
+        run_row = await self.pool.fetchrow(
+            """
+            SELECT count(*) AS bet_count, coalesce(sum(net), 0) AS net_total
+            FROM gambling_transactions
+            WHERE guild_id = $1 AND user_id = $2 AND created_at >= $3
+            """,
+            guild_id, user_id, streak_started_at,
+        )
+
+        return {
+            "lifetime": dict(lifetime),
+            "biggest_win": dict(big_win_row) if big_win_row else None,
+            "biggest_loss": dict(big_loss_row) if big_loss_row else None,
+            "favorite": dict(fav_row) if fav_row else None,
+            "current_run": dict(run_row) if run_row else {"bet_count": 0, "net_total": 0},
+        }
+
     # ── Items / inventory ─────────────────────────────────────────────
 
     async def get_inventory(self, guild_id):

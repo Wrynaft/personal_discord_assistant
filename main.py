@@ -1,3 +1,4 @@
+import asyncio
 import discord
 from discord.ext import commands, tasks
 from datetime import datetime, time, timezone, timedelta
@@ -1876,6 +1877,912 @@ async def blackjack(ctx):
     await ctx.send(embed=embed, view=view)
 
 
+# ── HiLo ─────────────────────────────────────────────────────────────
+
+class _HiLoButton(discord.ui.Button):
+    def __init__(self, label, direction, style=discord.ButtonStyle.primary, disabled=False):
+        super().__init__(label=label, style=style, disabled=disabled, row=0)
+        self.direction = direction
+
+    async def callback(self, interaction):
+        view: HiLoView = self.view
+        await view._guess(interaction, self.direction)
+
+
+class _HiLoCashOutButton(discord.ui.Button):
+    def __init__(self, amount):
+        super().__init__(label=f"\U0001f4b5 Cash Out  ${amount:,}", style=discord.ButtonStyle.success, row=1)
+
+    async def callback(self, interaction):
+        view: HiLoView = self.view
+        await view._cash_out(interaction)
+
+
+class HiLoView(discord.ui.View):
+    """Bet picker → reveal card → guess higher/lower → compound or cash out."""
+
+    def __init__(self, ctx, day_start_bank, current_bank):
+        super().__init__(timeout=180)
+        self.ctx = ctx
+        options = gambling.compute_bet_options(day_start_bank, current_bank, game="hilo")
+        self.amounts = {
+            "quarter": options["quarter"]["amount"],
+            "half":    options["half"]["amount"],
+            "max":     options["max"]["amount"],
+        }
+        self.bet = 0
+        self.current_card = None
+        self.current_value = 0
+        self.rounds_played = 0
+        self.history = []
+
+        self.quarter.label = f"¼  ${options['quarter']['amount']:,}"
+        self.quarter.disabled = not options['quarter']['enabled']
+        self.half.label = f"½  ${options['half']['amount']:,}"
+        self.half.disabled = not options['half']['enabled']
+        self.max_bet.label = f"MAX  ${options['max']['amount']:,}"
+        self.max_bet.disabled = not options['max']['enabled']
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("Not your HiLo game.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+    @discord.ui.button(style=discord.ButtonStyle.secondary)
+    async def quarter(self, interaction, button):
+        await self._start_game(interaction, self.amounts["quarter"])
+
+    @discord.ui.button(style=discord.ButtonStyle.primary)
+    async def half(self, interaction, button):
+        await self._start_game(interaction, self.amounts["half"])
+
+    @discord.ui.button(style=discord.ButtonStyle.danger)
+    async def max_bet(self, interaction, button):
+        await self._start_game(interaction, self.amounts["max"])
+
+    async def _start_game(self, interaction, bet):
+        self.bet = bet
+        self.current_value = bet
+        self.current_card = casino_games.hilo_draw()
+        self._build_play_buttons()
+        await interaction.response.edit_message(embed=self._build_play_embed(), view=self)
+
+    def _build_play_buttons(self):
+        self.clear_items()
+        h_mult, l_mult = casino_games.hilo_payouts(self.current_card)
+        self.add_item(_HiLoButton(
+            f"⬆ Higher  ({h_mult:.2f}x)" if h_mult > 0 else "⬆ Higher (impossible)",
+            "higher",
+            disabled=(h_mult <= 0),
+        ))
+        self.add_item(_HiLoButton(
+            f"⬇ Lower  ({l_mult:.2f}x)" if l_mult > 0 else "⬇ Lower (impossible)",
+            "lower",
+            disabled=(l_mult <= 0),
+        ))
+        if self.rounds_played > 0:
+            self.add_item(_HiLoCashOutButton(self.current_value))
+
+    def _format_history(self):
+        if not self.history:
+            return ""
+        parts = []
+        for card, direction, correct in self.history:
+            arrow = "⬆" if direction == "higher" else "⬇"
+            check = "✅" if correct else "❌"
+            parts.append(f"{casino_games.hilo_card_label(card)} {arrow} {check}")
+        return " → ".join(parts)
+
+    def _build_play_embed(self):
+        hist = self._format_history()
+        return discord.Embed(
+            title=f"\U0001f3b4 HiLo — ${self.bet:,} bet • {self.ctx.author.display_name}",
+            description=(
+                f"Current card: **[{casino_games.hilo_card_label(self.current_card)}]**\n"
+                f"Pot: **${self.current_value:,}**\n"
+                f"Rounds cleared: **{self.rounds_played}**\n"
+                + (f"\n**History:** {hist}\n" if hist else "\n")
+                + "\nWill the next card be **Higher** or **Lower**? (ties = loss)"
+            ),
+            color=0x9B59B6,
+        )
+
+    async def _guess(self, interaction, direction):
+        h_mult, l_mult = casino_games.hilo_payouts(self.current_card)
+        chosen_mult = h_mult if direction == "higher" else l_mult
+        next_card = casino_games.hilo_draw()
+        correct = casino_games.hilo_resolve(self.current_card, next_card, direction == "higher")
+        self.history.append((next_card, direction, correct))
+
+        if correct:
+            self.current_value = int(round(self.current_value * chosen_mult))
+            self.current_card = next_card
+            self.rounds_played += 1
+            self._build_play_buttons()
+            await interaction.response.edit_message(embed=self._build_play_embed(), view=self)
+        else:
+            await self._settle(interaction, won=False)
+
+    async def _cash_out(self, interaction):
+        await self._settle(interaction, won=True)
+
+    async def _settle(self, interaction, won):
+        for child in self.children:
+            child.disabled = True
+        payout = self.current_value if won else 0
+        outcome = await gambling.apply_bet(
+            guild_id=self.ctx.guild.id,
+            user_id=self.ctx.author.id,
+            user_name=self.ctx.author.display_name,
+            game="hilo",
+            bet=self.bet,
+            payout=payout,
+            metadata={
+                "rounds": self.rounds_played,
+                "won": won,
+                "history": [[c, d, ok] for c, d, ok in self.history],
+            },
+        )
+        if outcome is None or outcome.get("error"):
+            err = (outcome or {}).get("error", "DB unavailable")
+            await interaction.response.edit_message(
+                embed=discord.Embed(title="🎴 HiLo — Bet failed", description=f"`{err}`", color=0xE74C3C),
+                view=self,
+            )
+            return
+
+        net = outcome["net"]
+        new_bank = outcome["new_bank"]
+        if won:
+            color = 0x2ECC71
+            title_tag = f"💵 CASHED OUT after {self.rounds_played} rounds"
+            settle_line = f"**+${net:,}**"
+        else:
+            color = 0xE74C3C
+            title_tag = "💀 WRONG GUESS"
+            settle_line = f"**−${abs(net):,}** (busted at round {self.rounds_played + 1})"
+
+        desc = _augment_settle_description(
+            f"## {title_tag}\n{settle_line}\nBank: **${new_bank:,}**\n\n"
+            f"**History:** {self._format_history() or '_(no rounds played)_'}",
+            outcome,
+        )
+        embed = discord.Embed(
+            title=f"\U0001f3b4 HiLo — ${self.bet:,} bet • {self.ctx.author.display_name}",
+            description=desc,
+            color=color,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+# ── Mine Sweeper ─────────────────────────────────────────────────────
+
+class _MinesTileButton(discord.ui.Button):
+    def __init__(self, idx):
+        row = idx // casino_games.MINES_GRID_COLS
+        super().__init__(label="​", emoji="🟦", style=discord.ButtonStyle.primary, row=row)
+        self.idx = idx
+
+    async def callback(self, interaction):
+        view: MinesView = self.view
+        await view._reveal(interaction, self.idx)
+
+
+class _MinesCashOutButton(discord.ui.Button):
+    def __init__(self, amount, multiplier):
+        super().__init__(
+            label=f"💵 Cash Out ${amount:,} ({multiplier:.2f}x)",
+            style=discord.ButtonStyle.success,
+            row=4,
+        )
+
+    async def callback(self, interaction):
+        view: MinesView = self.view
+        await view._cash_out(interaction)
+
+
+class _MinesBetButton(discord.ui.Button):
+    def __init__(self, label, amount, enabled, style):
+        super().__init__(label=label, style=style, disabled=not enabled, row=0)
+        self.amount = amount
+
+    async def callback(self, interaction):
+        view: MinesView = self.view
+        await view._start_game(interaction, self.amount)
+
+
+class MinesView(discord.ui.View):
+    """Bet picker → 4x5 tile grid → reveal tiles, cash out anytime."""
+
+    def __init__(self, ctx, day_start_bank, current_bank, bomb_count=None):
+        super().__init__(timeout=180)
+        self.ctx = ctx
+        self.bomb_count = bomb_count or casino_games.MINES_DEFAULT_BOMBS
+        opts = gambling.compute_bet_options(day_start_bank, current_bank, game="mines")
+        self.bet_options = opts
+
+        self.bet = 0
+        self.bombs = set()
+        self.revealed = set()
+        self.busted = False
+
+        self.add_item(_MinesBetButton(f"¼  ${opts['quarter']['amount']:,}", opts['quarter']['amount'], opts['quarter']['enabled'], discord.ButtonStyle.secondary))
+        self.add_item(_MinesBetButton(f"½  ${opts['half']['amount']:,}", opts['half']['amount'], opts['half']['enabled'], discord.ButtonStyle.primary))
+        self.add_item(_MinesBetButton(f"MAX  ${opts['max']['amount']:,}", opts['max']['amount'], opts['max']['enabled'], discord.ButtonStyle.danger))
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("Not your minefield.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+    async def _start_game(self, interaction, bet):
+        self.bet = bet
+        self.bombs = casino_games.mines_layout(self.bomb_count)
+        self.clear_items()
+        for i in range(casino_games.MINES_GRID_SIZE):
+            self.add_item(_MinesTileButton(i))
+        # Cash out button starts disabled (no safe picks yet)
+        cash = _MinesCashOutButton(self.bet, 1.0)
+        cash.disabled = True
+        self.add_item(cash)
+        await interaction.response.edit_message(embed=self._build_play_embed(), view=self)
+
+    def _current_multiplier(self):
+        return casino_games.mines_multiplier(len(self.revealed), self.bomb_count)
+
+    def _current_value(self):
+        return int(round(self.bet * self._current_multiplier()))
+
+    def _build_play_embed(self):
+        mult = self._current_multiplier()
+        return discord.Embed(
+            title=f"\U0001f4a3 Mines — ${self.bet:,} bet • {self.ctx.author.display_name}",
+            description=(
+                f"Bombs: **{self.bomb_count}** hidden in {casino_games.MINES_GRID_SIZE} tiles\n"
+                f"Revealed safe: **{len(self.revealed)}**\n"
+                f"Current multiplier: **{mult:.2f}x**\n"
+                f"Pot if you cash out now: **${self._current_value():,}**\n\n"
+                "Reveal tiles for bigger payouts, or cash out anytime."
+            ),
+            color=0x1ABC9C,
+        )
+
+    async def _reveal(self, interaction, idx):
+        if self.busted or idx in self.revealed:
+            return
+        if idx in self.bombs:
+            # Bust — reveal all bombs and settle
+            self.busted = True
+            for child in list(self.children):
+                if isinstance(child, _MinesTileButton):
+                    if child.idx in self.bombs:
+                        child.emoji = "💣"
+                        child.style = discord.ButtonStyle.danger
+                    elif child.idx in self.revealed:
+                        child.emoji = "💎"
+                        child.style = discord.ButtonStyle.success
+                    child.disabled = True
+                else:
+                    child.disabled = True
+            await self._settle(interaction, won=False)
+            return
+        # Safe pick
+        self.revealed.add(idx)
+        # Update the clicked tile button
+        for child in self.children:
+            if isinstance(child, _MinesTileButton) and child.idx == idx:
+                child.emoji = "💎"
+                child.style = discord.ButtonStyle.success
+                child.disabled = True
+            elif isinstance(child, _MinesCashOutButton):
+                # Refresh cash-out label + enable
+                child.label = f"💵 Cash Out ${self._current_value():,} ({self._current_multiplier():.2f}x)"
+                child.disabled = False
+        await interaction.response.edit_message(embed=self._build_play_embed(), view=self)
+
+    async def _cash_out(self, interaction):
+        # Disable everything before settling
+        for child in self.children:
+            child.disabled = True
+        await self._settle(interaction, won=True)
+
+    async def _settle(self, interaction, won):
+        payout = self._current_value() if won else 0
+        outcome = await gambling.apply_bet(
+            guild_id=self.ctx.guild.id,
+            user_id=self.ctx.author.id,
+            user_name=self.ctx.author.display_name,
+            game="mines",
+            bet=self.bet,
+            payout=payout,
+            metadata={
+                "bomb_count": self.bomb_count,
+                "revealed": len(self.revealed),
+                "won": won,
+            },
+        )
+        if outcome is None or outcome.get("error"):
+            err = (outcome or {}).get("error", "DB unavailable")
+            await interaction.response.edit_message(
+                embed=discord.Embed(title="💣 Mines — Bet failed", description=f"`{err}`", color=0xE74C3C),
+                view=self,
+            )
+            return
+        net = outcome["net"]
+        new_bank = outcome["new_bank"]
+        if won:
+            title_tag = f"💵 CASHED OUT — {len(self.revealed)} safe picks"
+            color = 0x2ECC71
+            settle_line = f"**+${net:,}** ({self._current_multiplier():.2f}x payout)"
+        else:
+            title_tag = f"💥 BOOM — bomb on pick {len(self.revealed) + 1}"
+            color = 0xE74C3C
+            settle_line = f"**−${abs(net):,}**"
+        desc = _augment_settle_description(
+            f"## {title_tag}\n{settle_line}\nBank: **${new_bank:,}**",
+            outcome,
+        )
+        embed = discord.Embed(
+            title=f"\U0001f4a3 Mines — ${self.bet:,} bet • {self.ctx.author.display_name}",
+            description=desc,
+            color=color,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+@bot.hybrid_command(description="Play Mines — reveal tiles, avoid bombs, cash out anytime")
+async def mines(ctx, bombs: int = None):
+    """Open a mines bet picker. Optional bombs arg: 1-10 (default 3)."""
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+    bomb_count = bombs if bombs else casino_games.MINES_DEFAULT_BOMBS
+    if bomb_count < 1 or bomb_count > 10:
+        await ctx.send("Bombs must be between 1 and 10.")
+        return
+    state = await gambling.get_or_create_bank(ctx.guild.id)
+    if not state:
+        await ctx.send("Casino DB not available.")
+        return
+    bank = state["bank"]
+    day_start = state["day_start_bank"]
+    if bank <= 0:
+        await ctx.send("\U0001f4b8 Bank is empty. Wait for midnight settle.")
+        return
+
+    embed = discord.Embed(
+        title="\U0001f4a3 Mines",
+        description=(
+            f"Bank: **${bank:,}**  •  Day-start cap: **${day_start:,}**\n\n"
+            "**Rules:**\n"
+            f"• {casino_games.MINES_GRID_SIZE} tiles, **{bomb_count}** bombs hidden\n"
+            "• Click tiles to reveal. Safe = pot grows, bomb = lose everything\n"
+            "• Cash out anytime after the first safe pick\n\n"
+            "Pick your bet:"
+        ),
+        color=0x1ABC9C,
+    )
+    view = MinesView(ctx, day_start, bank, bomb_count)
+    await ctx.send(embed=embed, view=view)
+
+
+@bot.hybrid_command(description="Play HiLo — guess higher or lower on the next card, compound your winnings")
+async def hilo(ctx):
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+    state = await gambling.get_or_create_bank(ctx.guild.id)
+    if not state:
+        await ctx.send("Casino DB not available.")
+        return
+    bank = state["bank"]
+    day_start = state["day_start_bank"]
+    if bank <= 0:
+        await ctx.send("\U0001f4b8 Bank is empty. Wait for midnight settle.")
+        return
+
+    embed = discord.Embed(
+        title="\U0001f3b4 HiLo",
+        description=(
+            f"Bank: **${bank:,}**  •  Day-start cap: **${day_start:,}**\n\n"
+            "**Rules:**\n"
+            "• A card 1-13 (A low, K high) is revealed. Bet Higher or Lower on the next card\n"
+            "• Correct → pot grows by the shown multiplier. Cash out or keep going\n"
+            "• Wrong → lose everything. Ties count as a loss\n\n"
+            "Pick your bet:"
+        ),
+        color=0x9B59B6,
+    )
+    view = HiLoView(ctx, day_start, bank)
+    await ctx.send(embed=embed, view=view)
+
+
+# ── Dragon's Tower ───────────────────────────────────────────────────
+
+class _TowerDoorButton(discord.ui.Button):
+    def __init__(self, door_idx):
+        super().__init__(label=f"🚪 Door {door_idx + 1}", style=discord.ButtonStyle.primary, row=0)
+        self.door_idx = door_idx
+
+    async def callback(self, interaction):
+        view: TowerView = self.view
+        await view._pick_door(interaction, self.door_idx)
+
+
+class _TowerCashOutButton(discord.ui.Button):
+    def __init__(self, amount, multiplier):
+        super().__init__(
+            label=f"💵 Cash Out ${amount:,} ({multiplier:.2f}x)",
+            style=discord.ButtonStyle.success,
+            row=1,
+        )
+
+    async def callback(self, interaction):
+        view: TowerView = self.view
+        await view._cash_out(interaction)
+
+
+class _TowerBetButton(discord.ui.Button):
+    def __init__(self, label, amount, enabled, style):
+        super().__init__(label=label, style=style, disabled=not enabled, row=0)
+        self.amount = amount
+
+    async def callback(self, interaction):
+        view: TowerView = self.view
+        await view._start_game(interaction, self.amount)
+
+
+class TowerView(discord.ui.View):
+    """Climb the tower — pick safe doors to ascend, cash out anytime."""
+
+    def __init__(self, ctx, day_start_bank, current_bank):
+        super().__init__(timeout=180)
+        self.ctx = ctx
+        opts = gambling.compute_bet_options(day_start_bank, current_bank, game="tower")
+        self.bet = 0
+        self.traps = []
+        self.level = 0    # 0 = not started, 1+ = next level to attempt
+        self.busted = False
+        self.path = []    # list of (level, picked_door, trap_door, safe)
+
+        self.add_item(_TowerBetButton(f"¼  ${opts['quarter']['amount']:,}", opts['quarter']['amount'], opts['quarter']['enabled'], discord.ButtonStyle.secondary))
+        self.add_item(_TowerBetButton(f"½  ${opts['half']['amount']:,}", opts['half']['amount'], opts['half']['enabled'], discord.ButtonStyle.primary))
+        self.add_item(_TowerBetButton(f"MAX  ${opts['max']['amount']:,}", opts['max']['amount'], opts['max']['enabled'], discord.ButtonStyle.danger))
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("Not your tower.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+    async def _start_game(self, interaction, bet):
+        self.bet = bet
+        self.traps = casino_games.tower_level_traps()
+        self.level = 1
+        self._build_play_buttons()
+        await interaction.response.edit_message(embed=self._build_play_embed(), view=self)
+
+    def _current_multiplier(self):
+        # Multiplier reflects levels CLEARED (level - 1 because we're attempting level N).
+        return casino_games.tower_multiplier(self.level - 1)
+
+    def _current_value(self):
+        return int(round(self.bet * self._current_multiplier()))
+
+    def _build_play_buttons(self):
+        self.clear_items()
+        for i in range(casino_games.TOWER_DOORS):
+            self.add_item(_TowerDoorButton(i))
+        if self.level > 1:
+            self.add_item(_TowerCashOutButton(self._current_value(), self._current_multiplier()))
+
+    def _build_play_embed(self):
+        path_text = ""
+        if self.path:
+            path_lines = []
+            for lvl, picked, _trap, safe in self.path:
+                check = "✅" if safe else "💀"
+                path_lines.append(f"L{lvl}: Door {picked + 1} {check}")
+            path_text = "\n**Path:** " + " → ".join(path_lines)
+        return discord.Embed(
+            title=f"\U0001f409 Dragon's Tower — ${self.bet:,} bet • {self.ctx.author.display_name}",
+            description=(
+                f"Climbing **Level {self.level}** of {casino_games.TOWER_LEVELS}\n"
+                f"3 doors • 1 trap per level\n"
+                f"Current multiplier: **{self._current_multiplier():.2f}x**  "
+                f"(${self._current_value():,})\n"
+                f"{path_text}\n\n"
+                "Pick a door to ascend."
+            ),
+            color=0xE67E22,
+        )
+
+    async def _pick_door(self, interaction, door_idx):
+        if self.busted or self.level < 1:
+            return
+        trap_door = self.traps[self.level - 1]
+        safe = (door_idx != trap_door)
+        self.path.append((self.level, door_idx, trap_door, safe))
+
+        if not safe:
+            self.busted = True
+            for child in self.children:
+                child.disabled = True
+            await self._settle(interaction, won=False, trap_door=trap_door)
+            return
+
+        # Safe — ascend
+        self.level += 1
+        if self.level > casino_games.TOWER_LEVELS:
+            # Reached top — auto cash out
+            self.level = casino_games.TOWER_LEVELS + 1
+            for child in self.children:
+                child.disabled = True
+            await self._settle(interaction, won=True, trap_door=None, reached_top=True)
+            return
+
+        self._build_play_buttons()
+        await interaction.response.edit_message(embed=self._build_play_embed(), view=self)
+
+    async def _cash_out(self, interaction):
+        for child in self.children:
+            child.disabled = True
+        await self._settle(interaction, won=True, trap_door=None, reached_top=False)
+
+    async def _settle(self, interaction, won, trap_door, reached_top=False):
+        if won:
+            # If they cashed out, they've cleared (level - 1) levels.
+            # If they reached_top, they cleared all levels.
+            cleared = casino_games.TOWER_LEVELS if reached_top else max(0, self.level - 1)
+            payout = int(round(self.bet * casino_games.tower_multiplier(cleared)))
+        else:
+            cleared = self.level - 1
+            payout = 0
+        outcome = await gambling.apply_bet(
+            guild_id=self.ctx.guild.id,
+            user_id=self.ctx.author.id,
+            user_name=self.ctx.author.display_name,
+            game="tower",
+            bet=self.bet,
+            payout=payout,
+            metadata={
+                "levels_cleared": cleared,
+                "won": won,
+                "reached_top": reached_top,
+                "path": [[lvl, p, t, s] for lvl, p, t, s in self.path],
+            },
+        )
+        if outcome is None or outcome.get("error"):
+            err = (outcome or {}).get("error", "DB unavailable")
+            await interaction.response.edit_message(
+                embed=discord.Embed(title="🐉 Tower — Bet failed", description=f"`{err}`", color=0xE74C3C),
+                view=self,
+            )
+            return
+        net = outcome["net"]
+        new_bank = outcome["new_bank"]
+
+        path_lines = []
+        for lvl, picked, trap, safe in self.path:
+            check = "✅" if safe else "💀"
+            path_lines.append(f"L{lvl}: Door {picked + 1} {check}")
+        path_text = " → ".join(path_lines) if path_lines else "_(none)_"
+
+        if reached_top:
+            color = 0xF1C40F
+            title_tag = f"👑 REACHED THE TOP — {casino_games.TOWER_LEVELS} levels cleared!"
+            settle_line = f"**+${net:,}** ({casino_games.tower_multiplier(casino_games.TOWER_LEVELS):.2f}x payout)"
+        elif won:
+            color = 0x2ECC71
+            title_tag = f"💵 CASHED OUT at level {self.level} ({self.level - 1} cleared)"
+            settle_line = f"**+${net:,}** ({self._current_multiplier():.2f}x payout)"
+        else:
+            color = 0xE74C3C
+            title_tag = f"🔥 BURNED at Level {self.level}  (trap was door {trap_door + 1})"
+            settle_line = f"**−${abs(net):,}**"
+
+        desc = _augment_settle_description(
+            f"## {title_tag}\n{settle_line}\nBank: **${new_bank:,}**\n\n**Path:** {path_text}",
+            outcome,
+        )
+        embed = discord.Embed(
+            title=f"\U0001f409 Dragon's Tower — ${self.bet:,} bet • {self.ctx.author.display_name}",
+            description=desc,
+            color=color,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+@bot.hybrid_command(description="Climb the Dragon's Tower — pick safe doors, cash out anytime")
+async def tower(ctx):
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+    state = await gambling.get_or_create_bank(ctx.guild.id)
+    if not state:
+        await ctx.send("Casino DB not available.")
+        return
+    bank = state["bank"]
+    day_start = state["day_start_bank"]
+    if bank <= 0:
+        await ctx.send("\U0001f4b8 Bank is empty. Wait for midnight settle.")
+        return
+    embed = discord.Embed(
+        title="\U0001f409 Dragon's Tower",
+        description=(
+            f"Bank: **${bank:,}**  •  Day-start cap: **${day_start:,}**\n\n"
+            "**Rules:**\n"
+            f"• {casino_games.TOWER_LEVELS} levels. Each: **{casino_games.TOWER_DOORS} doors, 1 trap**\n"
+            "• Pick a safe door to ascend (multiplier grows ~1.43x per level)\n"
+            "• Trap = lose everything. Cash out after any cleared level\n"
+            f"• Reaching the top pays **{casino_games.tower_multiplier(casino_games.TOWER_LEVELS):.2f}x**\n\n"
+            "Pick your bet:"
+        ),
+        color=0xE67E22,
+    )
+    view = TowerView(ctx, day_start, bank)
+    await ctx.send(embed=embed, view=view)
+
+
+# ── Crash ────────────────────────────────────────────────────────────
+
+class _CrashCashOutButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="💵 Cash Out  1.00x", style=discord.ButtonStyle.success)
+
+    async def callback(self, interaction):
+        view: CrashView = self.view
+        await view._cash_out(interaction)
+
+
+class _CrashBetButton(discord.ui.Button):
+    def __init__(self, label, amount, enabled, style):
+        super().__init__(label=label, style=style, disabled=not enabled)
+        self.amount = amount
+
+    async def callback(self, interaction):
+        view: CrashView = self.view
+        await view._place_bet(interaction, self.amount)
+
+
+class CrashView(discord.ui.View):
+    """Bet picker → cash out button + background multiplier-climb task."""
+
+    LOOP_INTERVAL_S = 1.0  # edit_message rate-limit safe at 5/5s
+
+    def __init__(self, ctx, day_start_bank, current_bank):
+        super().__init__(timeout=120)
+        self.ctx = ctx
+        opts = gambling.compute_bet_options(day_start_bank, current_bank, game="crash")
+        self.bet = 0
+        self.crash_point = 1.0
+        self.current_mult = 1.0
+        self.start_time = 0.0
+        self.message = None
+        self._task = None
+        self._settled = False  # atomic flag — set without awaits in checks
+
+        self.add_item(_CrashBetButton(f"¼  ${opts['quarter']['amount']:,}", opts['quarter']['amount'], opts['quarter']['enabled'], discord.ButtonStyle.secondary))
+        self.add_item(_CrashBetButton(f"½  ${opts['half']['amount']:,}", opts['half']['amount'], opts['half']['enabled'], discord.ButtonStyle.primary))
+        self.add_item(_CrashBetButton(f"MAX  ${opts['max']['amount']:,}", opts['max']['amount'], opts['max']['enabled'], discord.ButtonStyle.danger))
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("Not your crash game.", ephemeral=True)
+            return False
+        return True
+
+    async def on_timeout(self):
+        if self._settled:
+            return
+        self._settled = True
+        if self._task:
+            self._task.cancel()
+        for child in self.children:
+            child.disabled = True
+
+    async def _place_bet(self, interaction, bet):
+        self.bet = bet
+        self.crash_point = casino_games.crash_generate()
+        self.start_time = asyncio.get_event_loop().time()
+        self.clear_items()
+        self.add_item(_CrashCashOutButton())
+        await interaction.response.edit_message(embed=self._build_play_embed(), view=self)
+        self.message = interaction.message
+        self._task = asyncio.create_task(self._run_loop())
+
+    def _build_play_embed(self):
+        return discord.Embed(
+            title=f"\U0001f680 Crash — ${self.bet:,} bet • {self.ctx.author.display_name}",
+            description=(
+                f"## **{self.current_mult:.2f}x**\n"
+                f"Pot if cashed now: **${int(round(self.bet * self.current_mult)):,}**\n\n"
+                "_Click Cash Out before it crashes!_"
+            ),
+            color=0xE91E63,
+        )
+
+    async def _run_loop(self):
+        try:
+            while True:
+                await asyncio.sleep(self.LOOP_INTERVAL_S)
+                if self._settled:
+                    return
+                elapsed = asyncio.get_event_loop().time() - self.start_time
+                new_mult = casino_games.crash_multiplier_at(elapsed)
+                # Crash check (cannot await between check & set)
+                if new_mult >= self.crash_point or elapsed > casino_games.CRASH_MAX_DURATION_S:
+                    if self._settled:
+                        return
+                    self._settled = True
+                    self.current_mult = self.crash_point
+                    for child in self.children:
+                        child.disabled = True
+                    await self._settle_crash()
+                    return
+                self.current_mult = new_mult
+                for child in self.children:
+                    if isinstance(child, _CrashCashOutButton):
+                        child.label = f"💵 Cash Out  {new_mult:.2f}x"
+                try:
+                    if self.message:
+                        await self.message.edit(embed=self._build_play_embed(), view=self)
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            pass
+
+    async def _cash_out(self, interaction):
+        if self._settled:
+            await interaction.response.send_message(
+                "Too late — already crashed!", ephemeral=True,
+            )
+            return
+        self._settled = True
+        if self._task:
+            self._task.cancel()
+        cashed_mult = self.current_mult
+        payout = int(round(self.bet * cashed_mult))
+        for child in self.children:
+            child.disabled = True
+
+        await interaction.response.defer()
+        outcome = await gambling.apply_bet(
+            guild_id=self.ctx.guild.id,
+            user_id=self.ctx.author.id,
+            user_name=self.ctx.author.display_name,
+            game="crash",
+            bet=self.bet,
+            payout=payout,
+            metadata={
+                "crash_point": round(self.crash_point, 4),
+                "cashed_at": round(cashed_mult, 4),
+                "won": True,
+            },
+        )
+        if outcome is None or outcome.get("error"):
+            err = (outcome or {}).get("error", "DB unavailable")
+            await interaction.edit_original_response(
+                embed=discord.Embed(title="🚀 Crash — Bet failed", description=f"`{err}`", color=0xE74C3C),
+                view=self,
+            )
+            return
+        net = outcome["net"]
+        new_bank = outcome["new_bank"]
+        desc = _augment_settle_description(
+            f"## 💵 CASHED OUT at **{cashed_mult:.2f}x**\n"
+            f"_(crash was at {self.crash_point:.2f}x)_\n"
+            f"**+${net:,}**\nBank: **${new_bank:,}**",
+            outcome,
+        )
+        await interaction.edit_original_response(
+            embed=discord.Embed(
+                title=f"\U0001f680 Crash — ${self.bet:,} bet • {self.ctx.author.display_name}",
+                description=desc,
+                color=0x2ECC71,
+            ),
+            view=self,
+        )
+
+    async def _settle_crash(self):
+        """Called when the multiplier reaches the crash point. Edits the message directly."""
+        outcome = await gambling.apply_bet(
+            guild_id=self.ctx.guild.id,
+            user_id=self.ctx.author.id,
+            user_name=self.ctx.author.display_name,
+            game="crash",
+            bet=self.bet,
+            payout=0,
+            metadata={
+                "crash_point": round(self.crash_point, 4),
+                "won": False,
+            },
+        )
+        if outcome is None or outcome.get("error"):
+            err = (outcome or {}).get("error", "DB unavailable")
+            try:
+                if self.message:
+                    await self.message.edit(
+                        embed=discord.Embed(title="🚀 Crash — Bet failed", description=f"`{err}`", color=0xE74C3C),
+                        view=self,
+                    )
+            except Exception:
+                pass
+            return
+        net = outcome["net"]
+        new_bank = outcome["new_bank"]
+        desc = _augment_settle_description(
+            f"## 💥 CRASHED AT **{self.crash_point:.2f}x**\n"
+            f"**−${abs(net):,}**\nBank: **${new_bank:,}**",
+            outcome,
+        )
+        try:
+            if self.message:
+                await self.message.edit(
+                    embed=discord.Embed(
+                        title=f"\U0001f680 Crash — ${self.bet:,} bet • {self.ctx.author.display_name}",
+                        description=desc,
+                        color=0xE74C3C,
+                    ),
+                    view=self,
+                )
+        except Exception:
+            pass
+
+
+@bot.hybrid_command(description="Play Crash — multiplier climbs, cash out before it crashes")
+async def crash(ctx):
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+    state = await gambling.get_or_create_bank(ctx.guild.id)
+    if not state:
+        await ctx.send("Casino DB not available.")
+        return
+    bank = state["bank"]
+    day_start = state["day_start_bank"]
+    if bank <= 0:
+        await ctx.send("\U0001f4b8 Bank is empty. Wait for midnight settle.")
+        return
+    embed = discord.Embed(
+        title="\U0001f680 Crash",
+        description=(
+            f"Bank: **${bank:,}**  •  Day-start cap: **${day_start:,}**\n\n"
+            "**Rules:**\n"
+            "• Multiplier climbs from 1.00x in real time\n"
+            "• Hit **Cash Out** before it crashes to lock in winnings\n"
+            "• Miss the timing → you lose everything\n"
+            "• Each round's crash point is random and pre-determined\n\n"
+            "Pick your bet:"
+        ),
+        color=0xE91E63,
+    )
+    view = CrashView(ctx, day_start, bank)
+    await ctx.send(embed=embed, view=view)
+
+
 @bot.hybrid_command(description="Show the shared casino bank, debt, and today's bet sizes")
 async def balance(ctx):
     """Show the shared casino bank state."""
@@ -1974,18 +2881,29 @@ async def casino(ctx):
         value=(
             "`/balance` — Bank, debt, day-start cap, time until settle\n"
             "`/leaderboard` — Top players for the current run\n"
+            "`/profile [@user]` — Per-user lifetime stats card\n"
             "`/tickets` — Ticket balance + earning rates"
         ),
         inline=False,
     )
     embed.add_field(
-        name="\U0001f3ae Games",
+        name="\U0001f3ae Games — single-shot",
         value=(
             "🎰 `/slots` — 3-reel slots, 3-of-a-kind only (50% bet cap)\n"
             "🎲 `/dice` — Craps: 7/11 instant win, point phase with 3-roll cap\n"
             "🎡 `/wheel` — Wheel of fortune, 6 outcomes incl. 10x jackpot\n"
             "🐎 `/horses` — 4 horses with weighted odds, pick then bet\n"
             "🃏 `/blackjack` — Standard 21 vs dealer (hits to 17)"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="\U0001f3ae Games — multiplier / cash-out",
+        value=(
+            "🚀 `/crash` — Multiplier climbs in real time, cash out before it crashes\n"
+            "🎴 `/hilo` — Higher or lower on the next card, compound across rounds\n"
+            "💣 `/mines [bombs]` — 4×5 grid, avoid bombs, cash out anytime\n"
+            "🐉 `/tower` — Climb 9 levels, pick safe doors, cash out anytime"
         ),
         inline=False,
     )
@@ -2356,6 +3274,87 @@ async def leaderboard(ctx):
             f"{len(stats)} players • Sorted by net P/L"
         )
     )
+    embed.timestamp = datetime.now(MYT)
+    await ctx.send(embed=embed)
+
+
+@bot.hybrid_command(description="Show a player's lifetime casino stats")
+async def profile(ctx, user: discord.Member = None):
+    """Per-user lifetime + current-run stats card."""
+    if not ctx.guild:
+        await ctx.send("This command only works in a server.")
+        return
+    if not await _enforce_casino_channel(ctx):
+        return
+
+    target = user or ctx.author
+    state = await gambling.get_or_create_bank(ctx.guild.id)
+    if not state:
+        await ctx.send("Casino DB not available.")
+        return
+
+    profile_data = await gambling.get_user_profile(
+        ctx.guild.id, target.id, state["streak_started_at"],
+    )
+    if not profile_data:
+        await ctx.send(f"{target.display_name} hasn't placed any bets yet.")
+        return
+
+    lt = profile_data["lifetime"]
+    bw = profile_data["biggest_win"]
+    bl = profile_data["biggest_loss"]
+    fav = profile_data["favorite"]
+    run = profile_data["current_run"]
+
+    bet_count = lt["bet_count"]
+    wins = lt["wins"]
+    losses = lt["losses"]
+    decisive = wins + losses  # exclude ties / refunds when computing win rate
+    win_rate = (wins / decisive * 100) if decisive > 0 else 0.0
+    net = lt["net_total"]
+    wagered = lt["total_wagered"]
+    rtp = ((wagered + net) / wagered * 100) if wagered > 0 else 0.0
+
+    embed = discord.Embed(
+        title=f"\U0001f464 Profile — {target.display_name}",
+        color=target.color if target.color != discord.Color.default() else 0x9B59B6,
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+
+    net_sign = "+" if net >= 0 else "−"
+    embed.add_field(
+        name="🎰 Lifetime",
+        value=(
+            f"Bets: **{bet_count}**\n"
+            f"Wagered: **${wagered:,}**\n"
+            f"Net P/L: **{net_sign}${abs(net):,}**\n"
+            f"RTP: **{rtp:.1f}%**\n"
+            f"Win rate: **{win_rate:.1f}%**  ({wins}W / {losses}L)"
+        ),
+        inline=True,
+    )
+
+    run_net = run["net_total"]
+    run_sign = "+" if run_net >= 0 else "−"
+    embed.add_field(
+        name="🎯 Current Run",
+        value=(
+            f"Bets: **{run['bet_count']}**\n"
+            f"Net: **{run_sign}${abs(run_net):,}**"
+        ),
+        inline=True,
+    )
+
+    highlights = []
+    if bw:
+        highlights.append(f"🏆 Biggest win: **+${bw['net']:,}**  (`/{bw['game']}`, {bw['created_at'].strftime('%Y-%m-%d')})")
+    if bl:
+        highlights.append(f"💀 Biggest loss: **−${abs(bl['net']):,}**  (`/{bl['game']}`, {bl['created_at'].strftime('%Y-%m-%d')})")
+    if fav:
+        highlights.append(f"❤️ Favorite: `/{fav['game']}` ({fav['plays']} plays)")
+    if highlights:
+        embed.add_field(name="📊 Highlights", value="\n".join(highlights), inline=False)
+
     embed.timestamp = datetime.now(MYT)
     await ctx.send(embed=embed)
 

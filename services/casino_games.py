@@ -167,3 +167,123 @@ def play_dealer(dealer_hand, deck):
     while hand_value(dealer_hand) < DEALER_STAND_ON:
         dealer_hand.append(deck.pop())
     return dealer_hand
+
+
+# ── HiLo ─────────────────────────────────────────────────────────────
+# Each round draws a uniform card 1-13 (A=1, K=13). Ties count as a loss.
+# Per-round RTP ~95%; compounding across rounds is up to the player.
+
+HILO_HOUSE_EDGE = 0.05
+
+
+def hilo_draw():
+    return random.randint(1, 13)
+
+
+def hilo_card_label(rank):
+    return {1: "A", 11: "J", 12: "Q", 13: "K"}.get(rank, str(rank))
+
+
+def hilo_payouts(current_card):
+    """(higher_mult, lower_mult) — total return per $1 bet given the shown card."""
+    p_higher = max(0.0, (13 - current_card) / 13.0)
+    p_lower  = max(0.0, (current_card - 1) / 13.0)
+    higher = (1 - HILO_HOUSE_EDGE) / p_higher if p_higher > 0 else 0.0
+    lower  = (1 - HILO_HOUSE_EDGE) / p_lower if p_lower > 0 else 0.0
+    return higher, lower
+
+
+def hilo_resolve(prev_card, next_card, picked_higher):
+    """Was the pick correct? Ties count as loss."""
+    if next_card == prev_card:
+        return False
+    return (next_card > prev_card) == picked_higher
+
+
+# ── Mine Sweeper ─────────────────────────────────────────────────────
+# 5x5 grid, N bombs. Each safe pick grows multiplier by (1 - edge) * tiles_left/safe_left.
+# Per-pick RTP = 1 - edge (= 95%). Cumulative RTP = 0.95^K after K successful picks.
+
+MINES_GRID_ROWS = 4
+MINES_GRID_COLS = 5
+MINES_GRID_SIZE = MINES_GRID_ROWS * MINES_GRID_COLS  # 20 — leaves row 4 free for Cash Out
+MINES_DEFAULT_BOMBS = 3
+MINES_HOUSE_EDGE = 0.05
+
+
+def mines_layout(bomb_count):
+    """Return a set of bomb positions in [0, MINES_GRID_SIZE)."""
+    positions = list(range(MINES_GRID_SIZE))
+    return set(random.sample(positions, bomb_count))
+
+
+def mines_multiplier(picks_made, bomb_count):
+    """Cumulative payout multiplier after `picks_made` safe picks (whole-bet return)."""
+    if picks_made <= 0:
+        return 1.0
+    mult = 1.0
+    for k in range(picks_made):
+        tiles_left = MINES_GRID_SIZE - k
+        safe_left = (MINES_GRID_SIZE - bomb_count) - k
+        if safe_left <= 0:
+            break
+        mult *= (tiles_left / safe_left) * (1 - MINES_HOUSE_EDGE)
+    return mult
+
+
+# ── Dragon's Tower ───────────────────────────────────────────────────
+# N levels (default 9). Each level: 3 doors, 1 trap. Pick a safe door to ascend.
+# Per-level: P(safe) = 2/3, payout ratio = 1.5 * (1 - edge) per level.
+
+TOWER_LEVELS = 9
+TOWER_DOORS = 3
+TOWER_TRAPS_PER_LEVEL = 1
+TOWER_HOUSE_EDGE = 0.05
+
+
+def tower_level_traps():
+    """For each level, pick the trap door index."""
+    return [random.randrange(TOWER_DOORS) for _ in range(TOWER_LEVELS)]
+
+
+def tower_multiplier(level_cleared):
+    """Cumulative payout multiplier after clearing `level_cleared` levels."""
+    if level_cleared <= 0:
+        return 1.0
+    safe = TOWER_DOORS - TOWER_TRAPS_PER_LEVEL  # 2
+    per_level = (TOWER_DOORS / safe) * (1 - TOWER_HOUSE_EDGE)  # 1.5 * 0.95 = 1.425
+    return per_level ** level_cleared
+
+
+# ── Crash ────────────────────────────────────────────────────────────
+# Multiplier climbs continuously; the bot picks a random crash point.
+# Distribution: P(crash >= x) = (1 - edge) / x — heavy-tailed, edge baked in.
+
+CRASH_HOUSE_EDGE = 0.05
+CRASH_INSTABUST_CHANCE = 0.03   # ~3% of rounds crash immediately at 1.00x
+CRASH_GROWTH_RATE = 0.10        # multiplier(t) = e^(rate * t)  [t in seconds]
+CRASH_MAX_DURATION_S = 60       # absolute safety cap
+
+
+def crash_generate():
+    """Return the crash multiplier for one round."""
+    if random.random() < CRASH_INSTABUST_CHANCE:
+        return 1.00
+    u = random.random()
+    if u >= 1.0:
+        return 1.00
+    return max(1.01, (1 - CRASH_HOUSE_EDGE) / (1 - u))
+
+
+def crash_multiplier_at(elapsed_seconds):
+    """Live multiplier as a function of elapsed time since start."""
+    import math
+    return math.exp(CRASH_GROWTH_RATE * elapsed_seconds)
+
+
+def crash_time_for(target_multiplier):
+    """How many seconds until the live multiplier reaches `target`?"""
+    import math
+    if target_multiplier <= 1.0:
+        return 0.0
+    return math.log(target_multiplier) / CRASH_GROWTH_RATE
